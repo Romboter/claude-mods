@@ -10,6 +10,8 @@
 //   (https://github.com/HolyGrail/claude-mods/tree/main/plugins/usage-meter), without copying its code.
 // Prompt cache: written for this mod after Daniel San's prompt-cache-control
 //   (https://github.com/davila7/claude-code-templates, MIT), without copying its code.
+// Agents card, its tool lines and last batch: adapted from Anji Xu's agentpane
+//   (https://github.com/xuanji86/claude-agentpane, MIT): latestBatch, batchReceipt, toolParts.
 //
 // The engine reads on(...) and $.noun.method(...) from the source: they stay spelled out,
 // and the functions that take $ live at the top level.
@@ -27,6 +29,7 @@ const TEXT = {
     day: "d",
     hour: "h",
     minute: "min",
+    second: "s",
     contextAlt: (word, percent, window) => `${word} · ${percent} of ${window}`,
     turnsAlt: (n) => `Tokens added by the last ${n} prompts`,
     gaugeAlt: (label, value) => `${label}: ${value} used`,
@@ -80,6 +83,9 @@ const TEXT = {
       none: "No subagent in this thread yet.",
       running: (model, description, time) => `Running: ${model} · “${description}” · ${time}`,
       saved: (usd, model) => `Delegating: ${usd} saved compared with ${model}.`,
+      doing: (tool, n) => `  ↳ ${tool} · ${n === 1 ? "1 call" : `${n} calls`}`,
+      batch: (n, wall, usd) => `Last batch: ${n} agents in ${wall}${usd ? ` · ${usd}` : ""}`,
+      batchHow: (together, calls) => [together ? `${together.toFixed(1)}× in parallel` : "", calls ? `${calls} ${calls === 1 ? "tool call" : "tool calls"}` : ""].filter(Boolean).join(" · "),
     },
     icons: { five_hour: "5-hour limit", seven_day: "7-day limit", spend_limit: "Spend limit", reset: "Resets in", cache: "Prompt cache", cost: "Session cost", lastPrompt: "Last prompt", agents: "Agents" },
   },
@@ -90,6 +96,7 @@ const TEXT = {
     day: "j",
     hour: "h",
     minute: "min",
+    second: "s",
     contextAlt: (word, percent, window) => `${word} · ${percent} de ${window}`,
     turnsAlt: (n) => `Tokens ajoutés par les ${n} derniers prompts`,
     gaugeAlt: (label, value) => `${label} : ${value} consommés`,
@@ -139,6 +146,9 @@ const TEXT = {
       none: "Aucun sous-agent dans ce fil.",
       running: (model, description, time) => `En cours : ${model} · « ${description} » · ${time}`,
       saved: (usd, model) => `Délégation : ${usd} économisés par rapport à ${model}.`,
+      doing: (tool, n) => `  ↳ ${tool} · ${n === 1 ? "1 appel" : `${n} appels`}`,
+      batch: (n, wall, usd) => `Dernier lot : ${n} agents en ${wall}${usd ? ` · ${usd}` : ""}`,
+      batchHow: (together, calls) => [together ? `${together.toFixed(1).replace(".", ",")}× en parallèle` : "", calls ? `${calls} ${calls === 1 ? "appel d'outil" : "appels d'outils"}` : ""].filter(Boolean).join(" · "),
     },
     icons: { five_hour: "Limite 5 h", seven_day: "Limite 7 jours", spend_limit: "Plafond de dépense", reset: "Remise à zéro dans", cache: "Cache de prompt", cost: "Coût du fil", lastPrompt: "Dernier prompt", agents: "Agents" },
   },
@@ -149,6 +159,7 @@ const TEXT = {
     day: "д",
     hour: "ч",
     minute: "мин",
+    second: "с",
     contextAlt: (word, percent, window) => `${word} · ${percent} из ${window}`,
     turnsAlt: (n) => `Токены, добавленные последними промптами: ${n}`,
     gaugeAlt: (label, value) => `${label}: израсходовано ${value}`,
@@ -198,6 +209,10 @@ const TEXT = {
       none: "В этом треде пока нет субагентов.",
       running: (model, description, time) => `В работе: ${model} · «${description}» · ${time}`,
       saved: (usd, model) => `Делегирование: сэкономлено ${usd} по сравнению с ${model}.`,
+      doing: (tool, n) => `  ↳ ${tool} · ${n} ${plural(n, "вызов", "вызова", "вызовов")}`,
+      batch: (n, wall, usd) => `Последняя группа: ${n} ${plural(n, "агент", "агента", "агентов")} за ${wall}${usd ? ` · ${usd}` : ""}`,
+      batchHow: (together, calls) =>
+        [together ? `${together.toFixed(1).replace(".", ",")}× параллельно` : "", calls ? `${calls} ${plural(calls, "вызов", "вызова", "вызовов")} ${plural(calls, "инструмента", "инструментов", "инструментов")}` : ""].filter(Boolean).join(" · "),
     },
     icons: { five_hour: "Лимит на 5 часов", seven_day: "Лимит на 7 дней", spend_limit: "Лимит расходов", reset: "Сброс через", cache: "Кэш промпта", cost: "Стоимость сессии", lastPrompt: "Последний промпт", agents: "Агенты" },
   },
@@ -389,6 +404,21 @@ let agentsKey = "";
 // Every subagent this thread ran, by id: { model, effort, usd, priced, input, read, write, output,
 // at, description, type }. Its requests are counted at list prices as they come back.
 let team = {};
+// Each agent's latest tool call and its calls so far ({ text, calls }), and when each agent ran
+// ({ from, to, seen, busy, ran, parentId }): the agents card's running lines and last batch. Kept in
+// memory only. After agentpane (xuanji86/claude-agentpane, MIT).
+let activity = {};
+let runs = {};
+// The runs that ended before their agent ran again (a teammate woken, an agent resumed), each in its
+// own batch: { id, from, to, ran, parentId, calls, usd, priced }.
+let past = [];
+let activityDirty = false;
+// A start more than 30 s after everything before it had ended opens a new batch.
+const BATCH_GAP = 30_000;
+// An agent no list names (a workflow's) counts as ended after a minute without a request or a tool call.
+const IDLE = 60_000;
+// One stuck inside a call (a stalled try) counts as ended after ten minutes without a trace.
+const STALLED = 10 * MINUTE;
 
 // ---------- Layout ----------
 
@@ -459,6 +489,9 @@ export function register(on, options) {
     seenTtl = null;
     savedUsd = 0;
     team = {};
+    activity = {};
+    runs = {};
+    past = [];
     lastPrompt = null;
     lastPrompt5h = null;
     cacheKey = "";
@@ -488,13 +521,51 @@ export function register(on, options) {
     cacheTicker = $.clock.every(10_000, async () => {
       const key = cacheText(cacheState(await $.clock.now()));
       const changed = await refreshAgents($);
-      if (key !== cacheKey || changed) {
+      if (key !== cacheKey || changed || activityDirty) {
         cacheKey = key;
+        activityDirty = false;
         $.ui.invalidate("ui.render");
       }
     });
     $.ui.invalidate("ui.render");
     return next(e);
+  });
+
+  // A subagent's tool call: its latest, for its running line in the agents card.
+  on("tool.call", async ($, e, next) => {
+    const id = e.agentId;
+    // Only agents spawned or listed: the engine's own forks (compaction, memory) are neither.
+    if (!id || !runs[id]) return next(e);
+    // Never in the way of the call: a failure here only loses a line of the card.
+    try {
+      // First the run (a new one starts before this call, which then counts in it), then the call.
+      touch(id, await $.clock.now(), 1);
+      const a = (activity[id] ??= { text: "", calls: 0 });
+      a.text = toolText(e.tool, e);
+      a.calls++;
+      activityDirty = true;
+    } catch {}
+    try {
+      return await next(e);
+    } finally {
+      try {
+        touch(id, await $.clock.now(), -1);
+      } catch {}
+    }
+  });
+
+  // An agent's start, ahead of the next list.
+  on("agent.spawn", async ($, e, next) => {
+    const started = await next(e);
+    try {
+      if (started?.agentId && !started.deny) {
+        const id = started.agentId;
+        const at = await $.clock.now();
+        if (!runs[id]) runs[id] = { from: at, to: null, seen: at, busy: 0, ran: true, parentId: e.parentAgentId ?? null, ...baseOf(id) };
+        else if (runs[id].to !== null) begin(id, runs[id], at);
+      }
+    } catch {}
+    return started;
   });
 
   on("session.end", async ($, e, next) => {
@@ -511,7 +582,15 @@ export function register(on, options) {
   on("turn.step", async function* ($, e, next) {
     if (e.agentId) {
       const at = await $.clock.now();
-      const result = yield* next(e);
+      touch(e.agentId, at, 1);
+      let result;
+      try {
+        result = yield* next(e);
+      } finally {
+        try {
+          touch(e.agentId, await $.clock.now(), -1);
+        } catch {}
+      }
       if (result?.usage) recordAgentStep(e.agentId, at, result.usage, e.model, e.effort);
       return result;
     }
@@ -894,6 +973,30 @@ async function refreshAgents($) {
     return false;
   }
   listed = (list ?? []).filter((a) => a && a.id);
+  const at = await $.clock.now();
+  for (const a of listed) {
+    const r = (runs[a.id] ??= { from: at, to: null, busy: 0, ran: false, parentId: a.parentId ?? null, ...baseOf(a.id) });
+    r.status = a.status;
+    // Running, waiting on its own agents or not yet started: open. Ended and open again (a teammate
+    // woken, a finished agent resumed under its id), or first seen idle and now running: a new run.
+    if (a.status === "running" || a.status === "waiting" || a.status === "pending") {
+      if (r.to !== null || (!r.ran && a.status === "running")) begin(a.id, r, at);
+    } else if (r.to === null && !(r.busy > 0 && at - (r.seen ?? at) <= STALLED)) {
+      // Idle between turns, or ended (not while one of its requests or tool calls runs):
+      // Its last request's end, when one was seen, rather than this reading's time.
+      r.to = r.seen !== undefined && r.seen >= r.from ? Math.min(at, r.seen) : at;
+      activityDirty = true;
+    }
+  }
+  // The agents no list names (a workflow's): ended at their last trace once idle for a minute,
+  // not while a request or a tool call runs (but for a stalled one).
+  for (const [id, r] of Object.entries(runs)) {
+    if (r.to !== null || r.seen === undefined || listed.some((a) => a.id === id)) continue;
+    if ((r.busy > 0 ? at - r.seen > STALLED : at - r.seen > IDLE)) {
+      r.to = r.seen;
+      activityDirty = true;
+    }
+  }
   const running = listed.filter((a) => a.status === "running").map((a) => ({ id: a.id, type: a.type ?? "", description: a.description ?? "" }));
   const key = running.map((a) => a.id).join(",");
   if (key === agentsKey) return false;
@@ -983,11 +1086,15 @@ function teamTip(now) {
     lines.push(g.priced ? T.team.line(label, approx(g.usd), cost !== null ? shareOf(g.usd, cost) : "") : label);
     lines.push(T.team.detail([...g.efforts].map(([e, n]) => `${e} ×${n}`).join(" · "), short(g.tokens)));
   }
-  if (list.length === 0 && agents.length === 0) lines.push(T.team.none);
+  const receipt = batchReceipt(now);
+  if (teamSize() === 0 && receipt.length === 0) lines.push(T.team.none);
   for (const r of agents) {
     const a = team[r.id];
     lines.push(T.team.running(modelName(a?.model) || r.type, r.description, a && now - a.at >= MINUTE ? duration(now - a.at) : T.underMinute));
+    const act = activity[r.id];
+    if (act?.text) lines.push(T.team.doing(act.text, act.calls));
   }
+  lines.push(...receipt);
   // The same tokens at the main thread's prices, for the agents on a cheaper model.
   const main = priceOf(mainModel, 0);
   if (main) {
@@ -1000,6 +1107,165 @@ function teamTip(now) {
     if (saved >= 0.01) lines.push(T.team.saved(approx(saved), modelName(mainModel)));
   }
   return lines.join("\n");
+}
+
+// An agent's activity (a request or a tool call starts, +1, or ends, -1): its last trace, the
+// only one for the agents no list names (a workflow's); active again, it reopens. Only agents
+// spawned or listed count: the engine's own forks (compaction, memory) are neither.
+function touch(id, at, step) {
+  const r = runs[id];
+  if (!r) return;
+  // A request or a tool call starting in an ended run, or in one never seen running: a new run.
+  if (step > 0 && (r.to !== null || !r.ran)) begin(id, r, at);
+  r.seen = at;
+  r.busy = Math.max(0, (r.busy ?? 0) + step);
+}
+
+// A run (re)starting at `at`. An ended one that ran stays in its batch as it was, with the tool
+// calls and the cost of that run alone; the new one counts from here.
+function begin(id, r, at) {
+  if (r.ran && r.to !== null) {
+    past.push({ id, from: r.from, to: r.to, ran: true, parentId: r.parentId, calls: callsOf(id) - (r.callsAt ?? 0), usd: usdOf(id) - (r.usdAt ?? 0), priced: team[id]?.priced !== false });
+    // A long session's wakes: the oldest runs go, the recent batches stay.
+    if (past.length > 500) past.shift();
+  }
+  Object.assign(r, { from: at, to: null, seen: at, ran: true, ...baseOf(id) });
+}
+
+// Where a run's tool calls and cost start: the agent's totals so far.
+function baseOf(id) {
+  return { callsAt: callsOf(id), usdAt: usdOf(id) };
+}
+const callsOf = (id) => activity[id]?.calls ?? 0;
+const usdOf = (id) => team[id]?.usd ?? 0;
+
+// The batches of agents seen running, oldest first: a start more than BATCH_GAP after
+// everything before it had ended opens a new one. After agentpane's latestBatch (MIT).
+export function batchesOf(all, gap = BATCH_GAP) {
+  const ran = all.filter((r) => r.ran).sort((x, y) => x.from - y.from);
+  const out = [];
+  let reach = -Infinity;
+  for (const r of ran) {
+    if (r.from > reach + gap || out.length === 0) out.push([]);
+    out[out.length - 1].push(r);
+    reach = Math.max(reach, r.to === null ? Infinity : r.to);
+  }
+  return out;
+}
+
+// The last batch of two or more that has ended, on two lines: agents, wall time and cost, then
+// how much ran side by side (an agent's subagents run inside its own time) and the tool calls.
+// After agentpane's batchReceipt (MIT); the cost is this mod's.
+function batchReceipt(now) {
+  const current = Object.entries(runs).map(([id, r]) => ({ id, ...r, calls: callsOf(id) - (r.callsAt ?? 0), usd: usdOf(id) - (r.usdAt ?? 0), priced: team[id]?.priced !== false }));
+  // An open run with nothing in flight and no trace for STALLED (a teammate whose pane died, an agent
+  // waiting on a plan) would keep its batch, and every later one, open for good: left out.
+  const all = [...past, ...current].filter((r) => r.to !== null || r.busy > 0 || r.status === "waiting" || now - (r.seen ?? r.from) <= STALLED);
+  const batch = batchesOf(all).filter((b) => new Set(b.map((r) => r.id)).size >= 2 && b.every((r) => r.to !== null)).pop();
+  if (!batch) return [];
+  const wall = Math.max(...batch.map((r) => r.to)) - Math.min(...batch.map((r) => r.from));
+  // Seen only once, running then ended at the same reading: no time to tell.
+  if (wall < 1000) return [];
+  const ids = new Set(batch.map((r) => r.id));
+  const work = batch.filter((r) => !ids.has(r.parentId)).reduce((n, r) => n + r.to - r.from, 0);
+  const calls = batch.reduce((n, r) => n + r.calls, 0);
+  const usd = batch.reduce((n, r) => n + r.usd, 0);
+  // An agent on a model without a price: no cost rather than a partial one.
+  const priced = batch.every((r) => r.priced);
+  const together = wall > 0 ? work / wall : 1;
+  const how = T.team.batchHow(together >= 1.2 ? together : 0, calls);
+  return [T.team.batch(ids.size, span(wall), priced && usd > 0 ? approx(usd) : ""), ...(how ? [`  ${how}`] : [])];
+}
+
+// "40 s", "1 min 42", then the band's own durations.
+function span(ms) {
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s} ${T.second}`;
+  if (s < 3600) return `${Math.floor(s / 60)} ${T.minute}${s % 60 ? ` ${String(s % 60).padStart(2, "0")}` : ""}`;
+  return duration(ms);
+}
+
+// A tool call in Claude Code's words, cut to fit the card's line ("  ↳ <text> · 12 calls" within 55
+// characters): "Bash(npm test)", "Read(register.tsx)", "github:list_issues". After agentpane's
+// toolParts (MIT).
+const TOOL_TEXT = 38;
+export function toolText(tool, e) {
+  const src = e?.input && typeof e.input === "object" ? e.input : e;
+  const s = (k) => (typeof src?.[k] === "string" ? src[k] : "");
+  const base = (p) => p.split(/[\\/]/).pop() ?? p;
+  const arg =
+    tool === "Bash" ? s("command")
+    : ["Read", "Write", "Edit", "NotebookEdit"].includes(tool) ? base(s("file_path") || s("notebook_path"))
+    : tool === "Grep" || tool === "Glob" ? s("pattern")
+    : tool === "WebFetch" ? s("url")
+    : tool === "WebSearch" ? s("query")
+    : tool === "Agent" ? s("description")
+    : tool === "Skill" ? s("skill")
+    : "";
+  let name = String(tool ?? "");
+  if (name.startsWith("mcp__")) {
+    // "mcp__github__list_issues" → "github:list_issues"; a connector's id (a UUID) says nothing, its
+    // tool alone; a long server name is shortened before the tool's.
+    const [server = "", ...parts] = name.slice(5).split("__");
+    const action = parts.join(":");
+    const room = 24 - [...action].length - 1;
+    name = /^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(server) || !server ? action : room >= 4 ? `${fit(server, room)}:${action}` : action;
+  }
+  name = fit(name, 24);
+  const one = masked(arg.replace(/\s+/g, " ").trim());
+  return one ? `${name}(${fit(one, Math.max(8, TOOL_TEXT - [...name].length - 2))})` : name;
+}
+
+// The text cut to n characters, never halfway through an emoji, "…" last.
+function fit(text, n) {
+  const c = [...text];
+  return c.length > n ? `${c.slice(0, n - 1).join("")}…` : text;
+}
+
+// Known token shapes, wherever they appear (the list of the garde-fous mod).
+const KNOWN_TOKENS = [
+  /\bsk-ant-[A-Za-z0-9_-]{20,}/g,
+  /\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}/g,
+  /\b(?:sk|rk|pk)_live_[A-Za-z0-9]{16,}/g,
+  /\b(?:sk|rk)_test_[A-Za-z0-9]{16,}/g,
+  /\bwhsec_[A-Za-z0-9]{16,}/g,
+  /\bre_[A-Za-z0-9_]{20,}/g,
+  /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{30,}/g,
+  /\bgithub_pat_[A-Za-z0-9_]{30,}/g,
+  /\bglpat-[A-Za-z0-9_-]{20,}/g,
+  /\bxox[abprs]-[A-Za-z0-9-]{20,}/g,
+  /\bAKIA[0-9A-Z]{16}\b/g,
+  /\bAIza[0-9A-Za-z_-]{35}\b/g,
+  /\bya29\.[0-9A-Za-z_-]{20,}/g,
+  /\bshp(?:at|ss|ca|pa)_[A-Fa-f0-9]{24,}/g,
+  /\b(?:secret|ntn)_[A-Za-z0-9]{30,}/g,
+  /\bnpm_[A-Za-z0-9]{30,}/g,
+  /\bdop_v1_[a-f0-9]{40,}/g,
+  /\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g,
+];
+
+// A secret in a tool's argument as "•••": the card may be shown or shared. An environment variable
+// (API_KEY=…), a flag (--token …, curl -u user:…, mysql -p…), a header (Authorization, Cookie), a
+// URL's user:password@ or query string, a known token shape. A word that only contains "key" or
+// "auth" (monkey=1, --author=eric) stays.
+function masked(text) {
+  // The card shows a few dozen characters: no need to scan a long command whole.
+  let t = text.slice(0, 2000)
+    .replace(/-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*/g, "•••")
+    .replace(/(\b[a-z][a-z0-9+.-]*:\/\/[^\s/:@]+:)[^\s@/]+@/gi, "$1•••@")
+    .replace(/(\bhttps?:\/\/[^\s?#"']*)[?#][^\s"']*/gi, "$1?…")
+    .replace(/\b(Authorization\s*[:=]\s*)(?:[A-Za-z]+\s+)?[^\s"']+/gi, "$1•••")
+    .replace(/\b((?:Set-)?Cookie\s*:\s*)[^"']+/gi, "$1•••")
+    .replace(/\b(Bearer\s+["']?)[^\s"']{6,}/gi, "$1•••")
+    .replace(/\b((?:X-)?Api-Key\s*:\s*)[^\s"']+/gi, "$1•••")
+    .replace(/(\s--?u(?:ser)?[\s=]+[^\s:]+:)[^\s"']+/g, "$1•••")
+    .replace(/(\s--(?:password|passwd|pass|token|api-key|apikey|secret|client-secret|auth-token|access-token|otp|ftp-password)[\s=]+)("[^"]*"|'[^']*'|[^\s"']+)/gi, "$1•••")
+    .replace(/(\b(?:mysql|mysqldump|mariadb)\b[^|;&]*?\s-p)('[^']*'|"[^"]*"|[^\s"']+)/g, "$1•••")
+    .replace(/(\b(?:sshpass|docker\s+login|podman\s+login|redis-cli)\b[^|;&]*?\s-[pa]\s+)('[^']*'|"[^"]*"|\S+)/g, "$1•••")
+    .replace(/\b([A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|AUTH|CREDENTIALS?)[A-Z0-9_]*\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s"']+)/g, "$1•••")
+    .replace(/((?:^|[\s"'{,;&?-])(?:[A-Za-z0-9]+[-_]){0,3}(?:api[-_]?key|apikey|token|secret|password|passwd|auth[-_]?token|access[-_]?key|private[-_]?key|client[-_]?secret)(?:\s*=|["']\s*:)\s*)("[^"]*"|'[^']*'|[^\s"'&,;}]+)/gi, "$1•••");
+  for (const re of KNOWN_TOKENS) t = t.replace(re, "•••");
+  return t;
 }
 
 // The cache block as the terminal writes it: "cache 8 min · $2.32 at stake".
