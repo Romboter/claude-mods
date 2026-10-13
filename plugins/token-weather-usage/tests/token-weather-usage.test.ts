@@ -1163,3 +1163,94 @@ test("agents: a subagent inside its parent's time does not count as running side
   expect(card).toContain("Last batch: 2 agents in 1 min\n  4 tool calls");
   expect(card).not.toContain("×");
 });
+
+// 7-day estimate: the day part the run-out falls in, as the band writes it (hours after midnight
+// belong to the day before).
+const FR_DAYS = ["dim.", "lun.", "mar.", "mer.", "jeu.", "ven.", "sam."];
+const FR_PARTS = ["nuit", "matin", "après-midi", "soir"];
+function frDayPart(ms: number) {
+  const d = new Date(ms);
+  const h = d.getHours();
+  const part = h < 6 ? 0 : h < 12 ? 1 : h < 18 ? 2 : 3;
+  return `${FR_DAYS[h < 6 ? (d.getDay() + 6) % 7 : d.getDay()]} ${FR_PARTS[part]}`;
+}
+const weekOf = (used: number, daysLeft: number) => [
+  { kind: "seven_day", percentUsed: used, resetsAt: new Date(NOW + daysLeft * 86_400_000).toISOString() },
+];
+const runOutText = (texts: string[]) => texts.find((t) => t.startsWith("⚠"));
+
+test("7-day estimate: at the week's pace the limit runs out before the reset", async ($, on) => {
+  world(on, { LANG: "fr_FR.UTF-8" });
+  // 70% in 4 days: 17.5% a day, the last 30% gone in about 1.7 days, before the reset in 3.
+  withUsage(on, weekOf(70, 3));
+  await $.session.start({ source: "startup", cwd: "/tmp" } as any);
+  const { ui, texts } = await band($, "terminal");
+  const out = NOW + (30 / 70) * 4 * 86_400_000;
+  expect(runOutText(texts)).toBe(`⚠ à court ${frDayPart(out)}`);
+  const pill: any = await ui.find({ type: "Text", text: `⚠ à court ${frDayPart(out)}` });
+  expect(pill?.props?.color).toBe("#a8690a");
+  const card = await cardOf((await band($, "desktop")).ui, "gauge-7j");
+  expect(card).toContain("À ce rythme (+70 % en 4j00h)");
+  expect(card).toContain("avant la remise à zéro du");
+});
+
+test("7-day estimate: none when the pace lasts until the reset", async ($, on) => {
+  world(on);
+  // 50% in 4 days: the last 50% would take 4 more days, the reset comes in 3.
+  withUsage(on, weekOf(50, 3));
+  await $.session.start({ source: "startup", cwd: "/tmp" } as any);
+  const { texts } = await band($, "terminal");
+  expect(runOutText(texts)).toBeUndefined();
+});
+
+test("7-day estimate: none in the week's first day or under 15% used", async ($, on) => {
+  world(on);
+  withUsage(on, [...weekOf(20, 6.5)]);
+  await $.session.start({ source: "startup", cwd: "/tmp" } as any);
+  expect(runOutText((await band($, "terminal")).texts)).toBeUndefined();
+});
+
+test("7-day estimate: none under 15% used", async ($, on) => {
+  world(on);
+  withUsage(on, weekOf(14, 6));
+  await $.session.start({ source: "startup", cwd: "/tmp" } as any);
+  expect(runOutText((await band($, "terminal")).texts)).toBeUndefined();
+});
+
+test("7-day estimate: the pace over the last day, red within a day", async ($, on) => {
+  const resetsAt = new Date(NOW + 3 * 86_400_000).toISOString();
+  // A day ago 30% was used: 40% in a day, the last 30% gone in 18 hours.
+  world(on, {}, { week: [{ at: NOW - 86_400_000, used: 30, resetsAt }] });
+  withUsage(on, [{ kind: "seven_day", percentUsed: 70, resetsAt }]);
+  await $.session.start({ source: "startup", cwd: "/tmp" } as any);
+  const { ui, texts } = await band($, "terminal");
+  const text = runOutText(texts);
+  expect(text?.startsWith("⚠ out ")).toBe(true);
+  const pill: any = await ui.find({ type: "Text", text });
+  expect(pill?.props?.color).toBe("red");
+  expect(await cardOf((await band($, "desktop")).ui, "gauge-7d")).toContain("At this pace (+40% in 1d00h)");
+});
+
+test("7-day estimate: readings are kept, at most one per half hour", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW }) as any;
+  mock.env(on, {});
+  const store = new Map<string, unknown>();
+  on("store.get", (_$: any, e: any) => ({ value: store.get(e.key) }));
+  on("store.set", (_$: any, e: any) => (store.set(e.key, e.value), { value: undefined }));
+  on("store.delete", (_$: any, e: any) => (store.delete(e.key), { value: undefined }));
+  on("store.keys", () => ({ value: [...store.keys()] }));
+  on("session.id", () => ({ value: "session-1" }));
+  on("session.start", (_$: any, e: any) => ({ cwd: e.cwd ?? "/tmp" }));
+  on("ui.invalidate", () => ({ value: undefined }));
+  const resetsAt = new Date(NOW + 3 * 86_400_000).toISOString();
+  const seven = (used: number) => [{ kind: "seven_day", percentUsed: used, resetsAt }];
+  on("session.usage", () => ({ value: { startedAt: NOW, context: { tokens: 1, window: 1_000_000, percent: 0 }, rateLimits: seven(60) } }));
+  on("session.measure", (_$: any, e: any) => ({ changed: e.changed }));
+  await $.session.start({ source: "startup", cwd: "/tmp" } as any);
+  await clock.advance(10 * 60_000);
+  await ($ as any).session.measure({ changed: ["rateLimits"], rateLimits: seven(61) } as any);
+  await clock.advance(25 * 60_000);
+  await ($ as any).session.measure({ changed: ["rateLimits"], rateLimits: seven(62) } as any);
+  const week = store.get("week") as any[];
+  expect(week.map((s) => s.used)).toEqual([60, 62]);
+});

@@ -41,6 +41,12 @@ const TEXT = {
     underMinute: "< 1 min",
     cost: (usd) => (usd >= 100 ? `≈ $${Math.round(usd)}` : `≈ $${usd.toFixed(2)}`),
     resetsAt: (time) => `Resets at ${time}`,
+    weekdays: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
+    dayParts: ["night", "morning", "afternoon", "evening"],
+    dayPart: (day, part) => `${day} ${part}`,
+    date: (day, d, m) => `${day} ${d}/${m}`,
+    runOut: (when) => `⚠ out ${when}`,
+    runOutTip: (gained, over, when, time, reset) => `At this pace (+${gained} in ${over}), the 7-day limit runs out ${when} around ${time}, before the reset on ${reset}. An estimate from your recent use.`,
     lastPrompt: (usd) => `+$${usd.toFixed(2)}`,
     lastPrompt5h: (points) => `+${decimal(points)}% 5h`,
     toRewrite: (tokens) => `${tokens} to rewrite`,
@@ -108,6 +114,12 @@ const TEXT = {
     underMinute: "< 1 min",
     cost: (usd) => (usd >= 100 ? `≈ ${Math.round(usd)} $` : `≈ ${usd.toFixed(2).replace(".", ",")} $`),
     resetsAt: (time) => `Remise à zéro à ${time}`,
+    weekdays: ["dim.", "lun.", "mar.", "mer.", "jeu.", "ven.", "sam."],
+    dayParts: ["nuit", "matin", "après-midi", "soir"],
+    dayPart: (day, part) => `${day} ${part}`,
+    date: (day, d, m) => `${day} ${d}/${m}`,
+    runOut: (when) => `⚠ à court ${when}`,
+    runOutTip: (gained, over, when, time, reset) => `À ce rythme (+${gained} en ${over}), la limite 7 jours sera atteinte ${when} vers ${time}, avant la remise à zéro du ${reset}. Estimation d’après ton usage récent.`,
     lastPrompt: (usd) => `+${usd.toFixed(2).replace(".", ",")} $`,
     lastPrompt5h: (points) => `+${decimal(points).replace(".", ",")} % 5h`,
     toRewrite: (tokens) => `${tokens} à réécrire`,
@@ -171,6 +183,12 @@ const TEXT = {
     underMinute: "< 1 мин",
     cost: (usd) => (usd >= 100 ? `≈ ${Math.round(usd)} $` : `≈ ${usd.toFixed(2).replace(".", ",")} $`),
     resetsAt: (time) => `Сброс в ${time}`,
+    weekdays: ["вс", "пн", "вт", "ср", "чт", "пт", "сб"],
+    dayParts: ["ночью", "утром", "днём", "вечером"],
+    dayPart: (day, part) => `${day} ${part}`,
+    date: (day, d, m) => `${day} ${d}.${m}`,
+    runOut: (when) => `⚠ кончится ${when}`,
+    runOutTip: (gained, over, when, time, reset) => `При таком темпе (+${gained} за ${over}) недельный лимит закончится ${when} около ${time}, до сброса ${reset}. Оценка по недавнему использованию.`,
     lastPrompt: (usd) => `+${usd.toFixed(2).replace(".", ",")} $`,
     lastPrompt5h: (points) => `+${decimal(points).replace(".", ",")}% 5ч`,
     toRewrite: (tokens) => `${tokens} к перезаписи`,
@@ -330,6 +348,20 @@ const SHARED_KEY = "limits";
 
 // Latest known reading: { at (ms), list: SessionRateLimit[] }.
 let limits = { at: 0, list: [] };
+
+// 7-day pace: readings of the week's share used, one per half hour over two days, kept in $.store
+// across sessions ({ at, used, resetsAt }, oldest first). The pace is read over the last day, or
+// over the whole week while fewer than six hours are known; shown only after a day of the week
+// and 15% used, when the limit would run out before the reset.
+const WEEK_KEY = "week";
+const WEEK_GAP = 30 * MINUTE;
+const WEEK_KEEP = 2 * DAY;
+const PACE_SPAN = DAY;
+const PACE_MIN_SPAN = 6 * HOUR;
+const OUT_MIN_ELAPSED = DAY;
+const OUT_MIN_USED = 15;
+const OUT_ALERT = DAY;
+let week = [];
 let ticker = null;
 
 // ---------- Prompt cache ----------
@@ -745,6 +777,32 @@ async function shareLimits($, list) {
     stored = null;
   }
   if (!stored || !(stored.at > at)) await $.store.set(SHARED_KEY, limits);
+  await recordWeek($, at, list);
+}
+
+// Adds a 7-day reading at most every half hour; a new week starts over.
+async function recordWeek($, at, list) {
+  const w = list.find((l) => l.kind === "seven_day");
+  if (!w || !w.resetsAt || !Number.isFinite(w.percentUsed)) return;
+  await loadWeek($);
+  week = week.filter((s) => s.resetsAt === w.resetsAt && s.at <= at && at - s.at <= WEEK_KEEP);
+  const last = week[week.length - 1];
+  if (last && at - last.at < WEEK_GAP) return;
+  week.push({ at, used: w.percentUsed, resetsAt: w.resetsAt });
+  try {
+    await $.store.set(WEEK_KEY, week);
+  } catch {
+    // Unwritable store: the pace waits for a later reading.
+  }
+}
+
+async function loadWeek($) {
+  try {
+    const saved = await $.store.get(WEEK_KEY);
+    if (Array.isArray(saved)) week = saved;
+  } catch {
+    // Unreadable store: keep this session's readings.
+  }
 }
 
 // Takes another session's reading when it is newer than ours.
@@ -755,6 +813,7 @@ async function adoptShared($) {
   } catch {
     // Unreadable store: keep the local reading.
   }
+  await loadWeek($);
 }
 
 function sortLimits(list) {
@@ -776,7 +835,41 @@ function gaugeOf(limit, now) {
   // The time left; the 5-hour reset time goes to the clock's tooltip.
   const when = left !== null ? duration(left) : "";
   const resetAt = left !== null && limit.kind === "five_hour" ? clockTime(resetMs) : "";
-  return { kind: limit.kind, label: T.labels[limit.kind] ?? limit.kind, used, elapsed, tone, value: T.percent(Math.round(used)), when, resetAt };
+  return { kind: limit.kind, label: T.labels[limit.kind] ?? limit.kind, used, elapsed, tone, value: T.percent(Math.round(used)), when, resetAt, out: runOutOf(limit, used, now) };
+}
+
+// When the 7-day limit runs out at the recent pace, if before the reset: { at, left, gained, over, resetMs }.
+function runOutOf(limit, used, now) {
+  if (limit.kind !== "seven_day") return null;
+  const resetMs = Date.parse(limit.resetsAt ?? "");
+  if (!Number.isFinite(resetMs)) return null;
+  if (SPANS.seven_day - (resetMs - now) < OUT_MIN_ELAPSED || used < OUT_MIN_USED || used >= 100) return null;
+  // The reading closest to a day ago, at least six hours old; otherwise the week's start.
+  let base = null;
+  for (const s of week) {
+    if (s.resetsAt !== limit.resetsAt || now - s.at < PACE_MIN_SPAN) continue;
+    if (!base || Math.abs(now - s.at - PACE_SPAN) < Math.abs(now - base.at - PACE_SPAN)) base = s;
+  }
+  const from = base ?? { at: resetMs - SPANS.seven_day, used: 0 };
+  const rate = (used - from.used) / (now - from.at);
+  if (!(rate > 0)) return null;
+  const at = now + (100 - used) / rate;
+  if (at >= resetMs) return null;
+  return { at, left: at - now, gained: used - from.used, over: now - from.at, resetMs };
+}
+
+// "Fri evening": the hours after midnight belong to the day before ("Fri night").
+function dayPartOf(ms) {
+  const d = new Date(ms);
+  const h = d.getHours();
+  const part = h < 6 ? 0 : h < 12 ? 1 : h < 18 ? 2 : 3;
+  const day = h < 6 ? (d.getDay() + 6) % 7 : d.getDay();
+  return T.dayPart(T.weekdays[day], T.dayParts[part]);
+}
+
+function dateOf(ms) {
+  const d = new Date(ms);
+  return T.date(T.weekdays[d.getDay()], String(d.getDate()).padStart(2, "0"), String(d.getMonth() + 1).padStart(2, "0"));
 }
 
 // 3h02, 42 min, 2d23h (2j23h in French, 2д23ч in Russian).
@@ -1298,8 +1391,18 @@ function gaugeBlock({ Box, Text, Svg }, mode, g) {
     parts.push(divider(Text, "s"), icon(Svg, "i", "clock", color, T.icons.reset, SMALL_ICON), Text({ key: "d", dimColor: true, children: g.when }));
   }
   else if (g.when && mode === "text") parts.push(Text({ key: "d", dimColor: true, children: `· ${g.when}` }));
-  // The 5-hour reset time goes to the hover card.
-  return { key: "gauge-" + g.label, tint: TINTS[g.kind] ?? TINTS.spend_limit, parts, tip: g.resetAt ? T.resetsAt(g.resetAt) : "" };
+  // The 7-day limit running out before the reset: amber, red within a day.
+  if (g.out) {
+    const color = g.out.left <= OUT_ALERT ? TONES.alert.text : TONES.fast.text;
+    parts.push(divider(Text, "o"), Text({ key: "w", bold: true, color, children: T.runOut(dayPartOf(g.out.at)) }));
+  }
+  // The 5-hour reset time and the 7-day estimate go to the hover card.
+  const tip = g.resetAt
+    ? T.resetsAt(g.resetAt)
+    : g.out
+      ? T.runOutTip(T.percent(Math.round(g.out.gained)), duration(g.out.over), dayPartOf(g.out.at), clockTime(g.out.at), dateOf(g.out.resetMs))
+      : "";
+  return { key: "gauge-" + g.label, tint: TINTS[g.kind] ?? TINTS.spend_limit, parts, tip };
 }
 
 function cacheBlock({ Text, Svg }, mode, state) {
@@ -1471,7 +1574,7 @@ function textWidth(gauges, cacheNow) {
     if (readings.length >= 2) width += 1 + turnDeltas().length + 1 + trendWord().length;
     blocks++;
   }
-  for (const g of gauges) width += g.label.length + 1 + TEXT_CELLS + 1 + g.value.length + (g.when ? 3 + g.when.length : 0);
+  for (const g of gauges) width += g.label.length + 1 + TEXT_CELLS + 1 + g.value.length + (g.when ? 3 + g.when.length : 0) + (g.out ? 3 + T.runOut(dayPartOf(g.out.at)).length : 0);
   blocks += gauges.length;
   if (cacheNow) {
     width += cacheText(cacheNow).length;

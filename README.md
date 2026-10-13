@@ -4,7 +4,7 @@
 
 ## token-weather-usage
 
-Stop hitting your Claude limit by surprise. One band above the prompt shows how big your context is, your 5-hour and weekly limits against the clock, whether the prompt cache is still warm, what the session and the last prompt cost, and which agents are running.
+Stop hitting your Claude limit by surprise. One band above the prompt shows how big your context is, your 5-hour and weekly limits against the clock (with a warning when the week's pace would run out before the reset), whether the prompt cache is still warm, what the session and the last prompt cost, and which agents are running.
 
 ![One session, step by step](docs/band-story.gif)
 
@@ -65,7 +65,7 @@ claude plugin test ./plugins/token-weather-usage
 
 ## Privacy
 
-token-weather-usage collects, sends and retains no personal data. It only reads the usage figures Claude Code provides (context fill, 5-hour and 7-day limits, session cost, each request's cache token counts), the list of the session's subagents and the tool calls they make (the tool's name and a short argument with secrets masked, shown in the agents card, kept in memory only and never stored), the locale variables above and the prompt-cache switches (`DISABLE_PROMPT_CACHING`, `FORCE_PROMPT_CACHING_5M`, `CLAUDE_CODE_PROMPT_CACHE_TTL`, `ENABLE_PROMPT_CACHING_1H`). It keeps in the plugin's local storage, on the machine, the latest limits reading and, per session, recent context readings, the last request's cache figures, what the cache saved in the session, the last prompt's cost and each subagent's model, effort, token counts and description (deleted after 8 idle days). No network requests.
+token-weather-usage collects, sends and retains no personal data. It only reads the usage figures Claude Code provides (context fill, 5-hour and 7-day limits, session cost, each request's cache token counts), the list of the session's subagents and the tool calls they make (the tool's name and a short argument with secrets masked, shown in the agents card, kept in memory only and never stored), the locale variables above and the prompt-cache switches (`DISABLE_PROMPT_CACHING`, `FORCE_PROMPT_CACHING_5M`, `CLAUDE_CODE_PROMPT_CACHE_TTL`, `ENABLE_PROMPT_CACHING_1H`). It keeps in the plugin's local storage, on the machine, the latest limits reading, the 7-day share used every half hour over the last two days, and, per session, recent context readings, the last request's cache figures, what the cache saved in the session, the last prompt's cost and each subagent's model, effort, token counts and description (deleted after 8 idle days). No network requests.
 
 ## Credits
 
