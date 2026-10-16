@@ -453,15 +453,13 @@ let activity = {};
 // Agents whose last response asked for tools still running.
 let waiting = {};
 let runs = {};
-// The spawns whose agent has not started its first turn yet: { prompt, parentId }.
-let spawning = [];
 // The runs that ended before their agent ran again (a teammate woken, an agent resumed), each in its
 // own batch: { id, from, to, ran, parentId, calls, usd, priced }.
 let past = [];
 let activityDirty = false;
 // A start more than 30 s after everything before it had ended opens a new batch.
 const BATCH_GAP = 30_000;
-// An agent no list names (a workflow's) counts as ended after a minute without a request or a tool call.
+// An agent the list no longer names counts as ended after a minute without a request or a tool call.
 const IDLE = 60_000;
 // One stuck inside a call (a stalled try) counts as ended after ten minutes without a trace.
 const STALLED = 10 * MINUTE;
@@ -538,7 +536,6 @@ export function register(on, options) {
     activity = {};
     waiting = {};
     runs = {};
-    spawning = [];
     past = [];
     lastPrompt = null;
     lastPrompt5h = null;
@@ -578,35 +575,6 @@ export function register(on, options) {
     });
     $.ui.invalidate("ui.render");
     return next(e);
-  });
-
-  // An agent's start: its prompt noted, the event passed on unchanged. The mod never stands in
-  // a spawn's way; the agent is known at its first turn, by that prompt.
-  on("agent.spawn", ($, e, next) => {
-    try {
-      spawning.push({ prompt: e.prompt ?? "", parentId: e.parentAgentId ?? null });
-      if (spawning.length > 200) spawning.shift();
-    } catch {}
-    return next(e);
-  });
-
-  // A subagent's run begins: one spawned a moment ago (a workflow's, which no list names) opens
-  // its run here. The engine's own forks (compaction, memory) were never spawned: they stay out.
-  on("turn.start", async ($, e, next) => {
-    const result = await next(e);
-    try {
-      const id = e.agentId;
-      if (id && !runs[id]) {
-        const i = spawning.findIndex((s) => s.prompt === (e.text ?? ""));
-        if (i >= 0) {
-          const [s] = spawning.splice(i, 1);
-          const at = await $.clock.now();
-          runs[id] = { from: at, to: null, seen: at, busy: 0, ran: true, parentId: s.parentId, ...baseOf(id) };
-          activityDirty = true;
-        }
-      }
-    } catch {}
-    return result;
   });
 
   on("session.end", async ($, e, next) => {
@@ -1138,7 +1106,7 @@ async function refreshAgents($) {
       activityDirty = true;
     }
   }
-  // The agents no list names (a workflow's): ended at their last trace once idle for a minute,
+  // The agents the list dropped: ended at their last trace once idle for a minute,
   // not while a request or a tool call runs (but for a stalled one).
   for (const [id, r] of Object.entries(runs)) {
     if (r.to !== null || r.seen === undefined || listed.some((a) => a.id === id)) continue;
@@ -1261,9 +1229,9 @@ function teamTip(now) {
 }
 
 // An agent's activity (a request or a tool call starts, +1, or ends, -1): its last trace, the
-// only one for the agents no list names (a workflow's); active again, it reopens. Only agents
-// spawned (known at their first turn) or listed count: the engine's own forks (compaction, memory)
-// are neither.
+// only one for the agents no list names; active again, it reopens. Only listed agents count: a
+// workflow's and the engine's own forks (compaction, memory) are not listed, and no other event
+// tells them apart.
 function touch(id, at, step) {
   const r = runs[id];
   if (!r) return;

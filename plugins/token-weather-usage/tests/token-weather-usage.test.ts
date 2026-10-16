@@ -867,8 +867,7 @@ test("cache savings: kept in the store, back on a resumed session", async ($, on
 
 // ---------- Agents card: each running agent's latest tool call, the last batch ----------
 
-// Each request answers with the tools queued by use(); a spawn starts the agent its description names,
-// whose first turn begins with the spawn's prompt, as in the engine.
+// Each request answers with the tools queued by use().
 function crew(on: any, env: Record<string, string> = {}, steps = true) {
   const clock = world(on, env);
   on("session.usage", () => ({ value: { startedAt: NOW, context: { tokens: 107_000, window: 1_000_000, percent: 11 }, rateLimits: LIMITS, cost: { usd: 10 } } }));
@@ -877,8 +876,6 @@ function crew(on: any, env: Record<string, string> = {}, steps = true) {
     const { uses, stop } = next.shift() ?? { uses: [], stop: "end_turn" };
     return { turnId: "t", index: 0, answer: "", toolUses: uses.map((name: string) => ({ name, input: { command: "SECRET=x" } })), stopReason: stop, usage: null };
   });
-  on("agent.spawn", (_$: any, e: any) => ({ model: "claude-haiku-5-5", agentId: e.description }));
-  on("turn.start", (_$: any, e: any) => ({ turnId: e.turnId }));
   return { advance: (ms: number) => clock.advance(ms) };
 }
 
@@ -891,16 +888,20 @@ async function use($: any, agentId: string, tool?: string, stop = "end_turn") {
   }
 }
 
-async function spawn($: any, ...ids: string[]) {
-  for (const id of ids) {
-    await $.agent.spawn({ tool_use_id: "workflow-1", prompt: "Work.", description: id, subagentType: "general-purpose" });
-    await $.turn.start({ turnId: `t-${id}`, text: "Work.", agentId: id });
-  }
-}
-
-async function spawnUnder($: any, parentAgentId: string, id: string) {
-  await $.agent.spawn({ tool_use_id: "agent-1", prompt: "Work.", description: id, subagentType: "general-purpose", parentAgentId });
-  await $.turn.start({ turnId: `t-${id}`, text: "Work.", agentId: id });
+// The agents $.agent.list() names: the engine lists one from its spawn, then marks it done. A
+// subagent's turn end makes the mod read the list again.
+function roster(on: any, others: any[] = []) {
+  const list: any[] = [];
+  on("agent.list", () => ({ value: [...others, ...list] }));
+  const add = async ($: any, ids: string[], parentId?: string) => {
+    for (const id of ids) list.push({ id, description: id, type: "general-purpose", status: "running", ...(parentId ? { parentId } : {}) });
+    await $.turn.complete({ answer: "", agentId: ids[0] } as any);
+  };
+  return {
+    add: ($: any, ...ids: string[]) => add($, ids),
+    addUnder: ($: any, parentId: string, id: string) => add($, [id], parentId),
+    done: () => list.forEach((a) => (a.status = "completed")),
+  };
 }
 
 // A subagent's request answered by engineStep's next usage.
@@ -978,18 +979,18 @@ for (const [lang, receipt] of [
   ["fr_FR.UTF-8", "Dernier lot : 2 agents en 20 s\n  3 appels d'outils"],
   ["ru_RU.UTF-8", "Последняя группа: 2 агента за 20 с\n  3 вызова инструментов"],
 ] as const) {
-  test(`agents: a workflow's agents, no list names them, make a batch once idle for a minute (${lang})`, async ($, on) => {
+  test(`agents: the last batch's receipt (${lang})`, async ($, on) => {
     const clock = crew(on, { LANG: lang });
-    on("agent.list", () => ({ value: [] }));
+    const team = roster(on);
     await $.session.start({ source: "startup", cwd: "/tmp" } as any);
-    await spawn($, "w1", "w2");
+    await team.add($, "w1", "w2");
     await use($, "w1", "Grep");
     await use($, "w2", "Glob");
     await clock.advance(20_000);
     await use($, "w1", "Read");
-    await clock.advance(30_000);
     expect(String(await cardOf((await band($, "desktop")).ui, "agents"))).not.toContain(receipt.split(" ")[0] + " " + receipt.split(" ")[1]);
-    await clock.advance(50_000);
+    team.done();
+    await clock.advance(10_000);
     expect(String(await cardOf((await band($, "desktop")).ui, "agents"))).toContain(receipt);
   });
 }
@@ -1024,45 +1025,6 @@ test("agents: the engine's own forks (no spawn, no list) make no batch", async (
   await use($, "fork-memory", "Write");
   await clock.advance(120_000);
   expect(await agentsCard($)).not.toContain("Last batch");
-});
-
-test("agents: only a turn that begins with a spawn's prompt opens a run", async ($, on) => {
-  const clock = crew(on);
-  on("agent.list", () => ({ value: [] }));
-  await $.session.start({ source: "startup", cwd: "/tmp" } as any);
-  await spawn($, "w1", "w2");
-  // A loop whose first turn matches no spawn's prompt (as the engine's own forks): never a run.
-  await $.agent.spawn({ tool_use_id: "workflow-1", prompt: "Work.", description: "x", subagentType: "general-purpose" });
-  await $.turn.start({ turnId: "t-x", text: "Summarize the conversation.", agentId: "x" });
-  await clock.advance(5_000);
-  await use($, "w1", "Read");
-  await use($, "w2", "Read");
-  await use($, "x", "Read");
-  await clock.advance(120_000);
-  expect(await agentsCard($)).toContain("Last batch: 2 agents in 5 s\n  2.0× in parallel · 2 tool calls");
-});
-
-test("agents: the mod passes a spawn on unchanged, whatever the engine answers", async ($, on) => {
-  world(on);
-  on("agent.spawn", (_$: any, e: any) => (e.description === "refused" ? { deny: "no" } : { model: "claude-haiku-5-5", agentId: e.description }));
-  await $.session.start({ source: "startup", cwd: "/tmp" } as any);
-  expect(await $.agent.spawn({ tool_use_id: "agent-1", prompt: "Work.", description: "x", subagentType: "Explore" } as any)).toEqual({ model: "claude-haiku-5-5", agentId: "x" });
-  expect(await $.agent.spawn({ tool_use_id: "agent-2", prompt: "Work.", description: "refused", subagentType: "Explore" } as any)).toEqual({ deny: "no" });
-});
-
-test("agents: a workflow agent inside a long tool call is not ended for being quiet", async ($, on) => {
-  const clock = crew(on);
-  on("agent.list", () => ({ value: [] }));
-  await $.session.start({ source: "startup", cwd: "/tmp" } as any);
-  await spawn($, "w1", "w2");
-  await use($, "w2", "Grep");
-  await use($, "w1", "Slow", "tool_use");
-  await clock.advance(150_000);
-  // w2 has long been quiet, w1 still in its call: the batch is not over.
-  expect(await agentsCard($)).not.toContain("Last batch");
-  await use($, "w1");
-  await clock.advance(70_000);
-  expect(await agentsCard($)).toContain("Last batch: 2 agents in 2 min 30\n  2 tool calls");
 });
 
 test("agents: an agent resumed later starts a new run, in a new batch", async ($, on) => {
@@ -1114,40 +1076,43 @@ test("agents: a teammate idle at start and woken later counts from its wake", as
 test("agents: an agent stuck open with no trace for 10 minutes no longer hides later batches", async ($, on) => {
   const clock = crew(on);
   // A teammate whose pane died: listed as running for good, never heard from.
-  on("agent.list", () => ({ value: [{ id: "z", description: "Gone", type: "teammate", status: "running" }] }));
+  const team = roster(on, [{ id: "z", description: "Gone", type: "teammate", status: "running" }]);
   await $.session.start({ source: "startup", cwd: "/tmp" } as any);
   await clock.advance(11 * 60_000);
-  await spawn($, "p", "q");
+  await team.add($, "p", "q");
   await use($, "p", "Read");
   await use($, "q", "Read");
   await clock.advance(30_000);
   await use($, "p", "Write");
-  await clock.advance(70_000);
+  team.done();
+  await clock.advance(10_000);
   expect(await agentsCard($)).toContain("Last batch: 2 agents in 30 s\n  3 tool calls");
 });
 
 test("agents: the receipt's cost, and none when an agent has no price", async ($, on) => {
   const clock = crew(on, {}, false);
-  on("agent.list", () => ({ value: [] }));
+  const team = roster(on);
   // 98k tokens a request, under Haiku 5.5's 100k threshold: $0.01165 each.
   const work = { input_tokens: 2_000, cache_read_input_tokens: 70_000, cache_creation_input_tokens: 6_000, output_tokens: 20_000 };
   engineStep(on, [{ ...work, model: "claude-haiku-5-5" }, { ...work, model: "claude-haiku-5-5" }, { ...work, model: "claude-haiku-5-5" }, { ...work, model: "claude-unknown-9" }, { ...work, model: "claude-haiku-5-5" }]);
   await $.session.start({ source: "startup", cwd: "/tmp" } as any);
-  await spawn($, "w1", "w2");
+  await team.add($, "w1", "w2");
   await agentStep($, "w1");
   await agentStep($, "w2");
   await clock.advance(20_000);
   await agentStep($, "w1");
-  await clock.advance(70_000);
+  team.done();
+  await clock.advance(10_000);
   expect(await agentsCard($)).toContain(`Last batch: 2 agents in 20 s · ≈ ${en$(3 * 0.01165)}`);
   // A later batch with an agent the price list does not know: no cost rather than a partial one.
   await clock.advance(120_000);
-  await spawn($, "w3", "w4");
+  await team.add($, "w3", "w4");
   await agentStep($, "w3", "claude-unknown-9");
   await agentStep($, "w4");
   await clock.advance(20_000);
   await use($, "w3", "Read");
-  await clock.advance(70_000);
+  team.done();
+  await clock.advance(10_000);
   const card = await agentsCard($);
   expect(card).toContain("Last batch: 2 agents in 20 s\n  1 tool call");
   expect(card).not.toContain("Last batch: 2 agents in 20 s · ≈");
@@ -1155,18 +1120,19 @@ test("agents: the receipt's cost, and none when an agent has no price", async ($
 
 test("agents: a subagent inside its parent's time does not count as running side by side", async ($, on) => {
   const clock = crew(on);
-  on("agent.list", () => ({ value: [] }));
+  const team = roster(on);
   await $.session.start({ source: "startup", cwd: "/tmp" } as any);
-  await spawn($, "p");
+  await team.add($, "p");
   await use($, "p", "Agent");
   await clock.advance(10_000);
-  await spawnUnder($, "p", "c");
+  await team.addUnder($, "p", "c");
   await use($, "c", "Read");
   await clock.advance(30_000);
   await use($, "c", "Read");
   await clock.advance(20_000);
   await use($, "p", "Write");
-  await clock.advance(70_000);
+  team.done();
+  await clock.advance(10_000);
   const card = await agentsCard($);
   expect(card).toContain("Last batch: 2 agents in 1 min\n  4 tool calls");
   expect(card).not.toContain("×");

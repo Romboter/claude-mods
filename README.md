@@ -126,6 +126,7 @@ In the app, **hover any pill** for its details.
 - Each subagent request is counted as it comes back, at list prices (output at 5× input, 5-minute cache writes assumed, Haiku 5.5 by prompt size); the main thread's share is the session cost less its agents'.
 - The terminal shows the count once the thread has run one.
 - Background shell commands are not counted (Claude Code does not expose them to mods).
+- A workflow's agents (the Workflow tool) are not shown: Claude Code does not list them, and telling them apart from its own internal agents would take a hook on agent spawns, which the plugin directory does not accept. Their cost still counts in each model's line.
 - The mod reads all this from the agents' responses: it never hooks a tool call, so it can neither slow one down nor stand in its way.
 
 </details>
@@ -164,6 +165,8 @@ claude plugin test ./plugins/token-weather-usage
 ## Privacy
 
 token-weather-usage collects, sends and retains no personal data. It only reads the usage figures Claude Code provides (context fill, 5-hour and 7-day limits, session cost, each request's cache token counts), the list of the session's subagents and the names of the tools their responses ask for (never the arguments; shown in the agents card, kept in memory only and never stored), the locale variables above and the prompt-cache switches (`DISABLE_PROMPT_CACHING`, `FORCE_PROMPT_CACHING_5M`, `CLAUDE_CODE_PROMPT_CACHE_TTL`, `ENABLE_PROMPT_CACHING_1H`). It reads no file and hooks no tool call. It keeps in the plugin's local storage, on the machine, the latest limits reading, the 7-day share used every half hour over the last two days, and, per session, recent context readings, the last request's cache figures, what the cache saved in the session, the last prompt's cost and each subagent's model, effort, token counts and description (deleted after 8 idle days). No network requests.
+
+**What its hooks do.** Every hook only reads and passes the event on unchanged (`return next(e)`): the mod never changes, delays or refuses anything. `session.start` and `session.end` start and stop its timers; `turn.step` reads each model response's token counts and the names of the tools it asks for; `turn.complete` reads the session's usage after each turn; `session.measure` reads new limits and cost readings; `session.compact` notes a compaction; `ui.render` draws the band above the prompt.
 
 ## Credits
 
