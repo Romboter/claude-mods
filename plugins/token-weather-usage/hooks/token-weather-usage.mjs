@@ -1555,7 +1555,8 @@ function drawLine(elements, surface, columns, now) {
         backgroundColor: b.tint[0],
       }),
     );
-    return Box({ flexDirection: "row", alignItems: "center", columnGap: 1, paddingX: 1, children: pills });
+    // A narrow window wraps the pills onto a second line instead of clipping the last ones (#2).
+    return Box({ flexDirection: "row", flexWrap: "wrap", alignItems: "center", columnGap: 1, rowGap: 1, paddingX: 1, children: pills });
   }
   const children = [];
   blocks.forEach((b, i) => {
