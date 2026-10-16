@@ -175,3 +175,7 @@ token-weather-usage collects, sends and retains no personal data. It only reads 
 ## License
 
 Apache-2.0, see [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+## By the same author
+
+[FacilAbo](https://www.facilabo.com): 230+ calendars (public and school holidays, tax deadlines, sport) to subscribe to in one tap, on [iPhone](https://apps.apple.com/fr/app/facilabo-de-200-calendriers/id6756318719) and [Android](https://play.google.com/store/apps/details?id=app.facilabo.android). EuroVolt, your Linky electricity use in euros, is coming soon on iPhone.
