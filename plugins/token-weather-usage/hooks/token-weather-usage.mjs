@@ -68,6 +68,11 @@ const TEXT = {
       missed: (share, cause, tokens, surcharge) =>
         `This message read only ${share} from the cache (${cause}): it wrote ${tokens} tokens again${surcharge ? `, ${surcharge} more than a message served by the cache` : ""}.`,
       compacted: "Compacted: the next message writes a new, smaller cache.",
+      idleAt: (time, left) => `Idle compaction around ${time}, in ${left}, if no message comes first.`,
+      idleOff: "Idle compaction: not yet enabled for your account by Anthropic.",
+      idleDisabled: "Idle compaction: turned off in settings (idleCompaction).",
+      idleTtl: "Idle compaction: needs a 1-hour cache.",
+      idleSmall: (min, tokens) => `Idle compaction: from ${min}; this thread is at ${tokens}.`,
     },
     agents: (n) => (n === 1 ? "1 agent" : `${n} agents`),
     agentsRunning: (running, n) => `${running} running · ${n}`,
@@ -139,6 +144,11 @@ const TEXT = {
       missed: (share, cause, tokens, surcharge) =>
         `Ce message n'a lu que ${share} depuis le cache (${cause}) : il a réécrit ${tokens} tokens${surcharge ? `, ${surcharge} de plus qu'un message servi par le cache` : ""}.`,
       compacted: "Compacté : le prochain message écrira un cache neuf, plus petit.",
+      idleAt: (time, left) => `Compaction à l'arrêt vers ${time}, dans ${left}, si aucun message n'arrive avant.`,
+      idleOff: "Compaction à l'arrêt : pas encore ouverte à ton compte par Anthropic.",
+      idleDisabled: "Compaction à l'arrêt : coupée dans les réglages (idleCompaction).",
+      idleTtl: "Compaction à l'arrêt : il faut un cache d'une heure.",
+      idleSmall: (min, tokens) => `Compaction à l'arrêt : dès ${min} ; ce fil est à ${tokens}.`,
     },
     agents: (n) => (n === 1 ? "1 agent" : `${n} agents`),
     agentsRunning: (running, n) => `${running} en cours · ${n}`,
@@ -208,6 +218,11 @@ const TEXT = {
       missed: (share, cause, tokens, surcharge) =>
         `Это сообщение прочитало из кэша только ${share} (${cause}): ${tokens} токенов записаны заново${surcharge ? `, на ${surcharge} дороже, чем сообщение из кэша` : ""}.`,
       compacted: "Сжато: следующее сообщение запишет новый, меньший кэш.",
+      idleAt: (time, left) => `Сжатие при простое около ${time}, через ${left}, если не придёт сообщение.`,
+      idleOff: "Сжатие при простое: Anthropic ещё не включила его для вашего аккаунта.",
+      idleDisabled: "Сжатие при простое: выключено в настройках (idleCompaction).",
+      idleTtl: "Сжатие при простое: нужен кэш на 1 час.",
+      idleSmall: (min, tokens) => `Сжатие при простое: от ${min}; в этой ветке ${tokens}.`,
     },
     agents: (n) => `${n} ${plural(n, "агент", "агента", "агентов")}`,
     agentsRunning: (running, n) => `${running} в работе · ${n}`,
@@ -528,6 +543,7 @@ export function register(on, options) {
     lastPrompt5h = null;
     cacheKey = "";
     cacheEnv = await cacheEnvOf($);
+    await refreshIdle($, await $.clock.now());
     turnsKey = TURNS_PREFIX + (await $.session.id());
     await restoreTurns($);
     const usage = await $.session.usage();
@@ -546,6 +562,7 @@ export function register(on, options) {
     // Every minute: elapsed time moves on, and another session may have measured something newer.
     ticker = $.clock.every(MINUTE, async () => {
       await adoptShared($);
+      await refreshIdle($, await $.clock.now());
       $.ui.invalidate("ui.render");
     });
     // The cache countdown: a redraw only when its text changes.
@@ -926,6 +943,54 @@ async function cacheEnvOf($) {
   };
 }
 
+// Idle compaction: Claude Code compacts a large idle conversation shortly before its 1-hour cache
+// lapses, once Anthropic enables it for the account (the tengu_sunny_locket flag Claude Code caches
+// in ~/.claude.json). Read every 10 minutes: { mode, minTokens, fraction, disabled }; null unknown.
+const IDLE_MIN = 200000;
+const IDLE_FLOOR = 100000;
+const IDLE_FRACTION = 0.9;
+const IDLE_REFRESH = 10 * MINUTE;
+let idle = null;
+let idleRead = 0;
+
+async function refreshIdle($, now) {
+  if (idle && now - idleRead < IDLE_REFRESH) return;
+  idleRead = now;
+  try {
+    const home = await $.env.get("HOME");
+    if (!home) return;
+    const flag = JSON.parse(await $.fs.read(`${home}/.claude.json`))?.cachedGrowthBookFeatures?.tengu_sunny_locket;
+    let disabled = false;
+    try {
+      disabled = JSON.parse(await $.fs.read(`${home}/.claude/settings.json`))?.idleCompaction === false;
+    } catch {
+      // No settings file: on by default.
+    }
+    const envMin = Number(await $.env.get("CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS"));
+    const min = Number.isFinite(envMin) && envMin > 0 ? envMin : flag?.minTokens;
+    const fraction = flag?.fireAtFraction;
+    idle = {
+      mode: flag?.mode === "compact" ? "compact" : "off",
+      minTokens: Number.isFinite(min) ? Math.max(IDLE_FLOOR, min) : IDLE_MIN,
+      fraction: Number.isFinite(fraction) ? Math.min(0.95, Math.max(0.5, fraction)) : IDLE_FRACTION,
+      disabled,
+    };
+  } catch {
+    // Unreadable: say nothing rather than guess.
+  }
+}
+
+// The hover card's idle compaction line for a warm cache, or null.
+function idleLine(now, ttl, tokens) {
+  if (!idle) return null;
+  if (idle.mode !== "compact") return T.tips.idleOff;
+  if (idle.disabled) return T.tips.idleDisabled;
+  if (ttl !== TTL["1h"]) return T.tips.idleTtl;
+  if (tokens < idle.minTokens) return T.tips.idleSmall(short(idle.minTokens), short(tokens));
+  const at = cache.at + idle.fraction * ttl;
+  return at > now ? T.tips.idleAt(clockTime(at), duration(at - now)) : null;
+}
+
 function isOn(value) {
   return /^(1|true|yes|on)$/i.test(String(value).trim());
 }
@@ -1041,14 +1106,18 @@ function cacheState(now) {
   // Under 10 minutes: what letting it lapse would cost.
   if (soon) {
     const stake = T.atStake(costs ? T.money(costs.rewrite) : short(tokens));
-    const tip = T.tips.soon(expiry, short(tokens), costs && { read: approx(costs.read), rewrite: approx(costs.rewrite) });
-    return { tone: "fast", ...shown, urgent: true, stake, tip };
+    const tip = [T.tips.soon(expiry, short(tokens), costs && { read: approx(costs.read), rewrite: approx(costs.rewrite) })];
+    const idleNote = idleLine(now, ttl, tokens);
+    if (idleNote) tip.push(idleNote);
+    return { tone: "fast", ...shown, urgent: true, stake, tip: tip.join("\n") };
   }
   const tip = [T.tips.warm(expiry, ttl === TTL["1h"], seenTtl !== null), T.tips.lastRead(T.percent(share), short(cache.read ?? 0))];
   if (costs) {
     tip.push(T.tips.costs(approx(costs.read), approx(costs.rewrite)));
     if (savedUsd >= 0.01) tip.push(T.tips.saved(approx(savedUsd)));
   }
+  const idleNote = idleLine(now, ttl, tokens);
+  if (idleNote) tip.push(idleNote);
   return { tone: "calm", ...shown, urgent: false, tip: tip.join("\n") };
 }
 

@@ -1254,3 +1254,59 @@ test("7-day estimate: readings are kept, at most one per half hour", async ($, o
   const week = store.get("week") as any[];
   expect(week.map((s) => s.used)).toEqual([60, 62]);
 });
+
+// Idle compaction: Claude Code's own files say whether Anthropic enabled it and from what size.
+function idleFiles(on: any, flag: unknown, settings: unknown = {}) {
+  on("fs.read", (_$: any, e: any) => {
+    if (e.path === "/h/.claude.json") return { value: JSON.stringify({ cachedGrowthBookFeatures: { tengu_sunny_locket: flag } }) };
+    if (e.path === "/h/.claude/settings.json") return { value: JSON.stringify(settings) };
+    throw new Error("ENOENT " + e.path);
+  });
+}
+
+async function idleTip($: any, on: any, flag: unknown, settings: unknown = {}, lang = "fr_FR.UTF-8") {
+  const clock = world(on, { LANG: lang, HOME: "/h" });
+  idleFiles(on, flag, settings);
+  withUsage(on, LIMITS, BIG);
+  engineStep(on, [BIG_HIT, BIG_HIT]);
+  await $.session.start({ source: "startup", cwd: "/tmp" } as any);
+  await step($, BIG_HIT);
+  // A hit 6 minutes later proves the 1-hour lifetime.
+  await clock.advance(6 * 60_000);
+  await step($, BIG_HIT);
+  return (await boltTip((await band($, "desktop")).ui)) as string;
+}
+
+test("idle compaction: not yet enabled by Anthropic", async ($, on) => {
+  const tip = await idleTip($, on, { mode: "off" });
+  expect(tip.split("\n").pop()).toBe("Compaction à l'arrêt : pas encore ouverte à ton compte par Anthropic.");
+});
+
+test("idle compaction: enabled, when it fires", async ($, on) => {
+  const tip = await idleTip($, on, { mode: "compact" });
+  // 289k, above 200k: 54 minutes (90% of the hour) after the last request.
+  expect(tip.split("\n").pop()).toBe(`Compaction à l'arrêt vers ${at(NOW + 6 * 60_000 + 0.9 * 3_600_000)}, dans 54 min, si aucun message n'arrive avant.`);
+});
+
+test("idle compaction: below its threshold, and turned off in settings", async ($, on) => {
+  expect((await idleTip($, on, { mode: "compact", minTokens: 300000 })).split("\n").pop()).toBe("Compaction à l'arrêt : dès 300k ; ce fil est à 289k.");
+});
+
+test("idle compaction: turned off in settings, English", async ($, on) => {
+  const tip = await idleTip($, on, { mode: "compact" }, { idleCompaction: false }, "en_US.UTF-8");
+  expect(tip.split("\n").pop()).toBe("Idle compaction: turned off in settings (idleCompaction).");
+});
+
+test("idle compaction: unreadable files say nothing", async ($, on) => {
+  const clock = world(on, { LANG: "fr_FR.UTF-8", HOME: "/h" });
+  on("fs.read", () => {
+    throw new Error("ENOENT");
+  });
+  withUsage(on, LIMITS, BIG);
+  engineStep(on, [BIG_HIT, BIG_HIT]);
+  await $.session.start({ source: "startup", cwd: "/tmp" } as any);
+  await step($, BIG_HIT);
+  await clock.advance(6 * 60_000);
+  await step($, BIG_HIT);
+  expect(await boltTip((await band($, "desktop")).ui)).not.toContain("arrêt");
+});
