@@ -453,6 +453,8 @@ let activity = {};
 // Agents whose last response asked for tools still running.
 let waiting = {};
 let runs = {};
+// The spawns whose agent has not started its first turn yet: { prompt, parentId }.
+let spawning = [];
 // The runs that ended before their agent ran again (a teammate woken, an agent resumed), each in its
 // own batch: { id, from, to, ran, parentId, calls, usd, priced }.
 let past = [];
@@ -536,6 +538,7 @@ export function register(on, options) {
     activity = {};
     waiting = {};
     runs = {};
+    spawning = [];
     past = [];
     lastPrompt = null;
     lastPrompt5h = null;
@@ -577,18 +580,33 @@ export function register(on, options) {
     return next(e);
   });
 
-  // An agent's start, ahead of the next list.
-  on("agent.spawn", async ($, e, next) => {
-    const started = await next(e);
+  // An agent's start: its prompt noted, the event passed on unchanged. The mod never stands in
+  // a spawn's way; the agent is known at its first turn, by that prompt.
+  on("agent.spawn", ($, e, next) => {
     try {
-      if (started?.agentId && !started.deny) {
-        const id = started.agentId;
-        const at = await $.clock.now();
-        if (!runs[id]) runs[id] = { from: at, to: null, seen: at, busy: 0, ran: true, parentId: e.parentAgentId ?? null, ...baseOf(id) };
-        else if (runs[id].to !== null) begin(id, runs[id], at);
+      spawning.push({ prompt: e.prompt ?? "", parentId: e.parentAgentId ?? null });
+      if (spawning.length > 200) spawning.shift();
+    } catch {}
+    return next(e);
+  });
+
+  // A subagent's run begins: one spawned a moment ago (a workflow's, which no list names) opens
+  // its run here. The engine's own forks (compaction, memory) were never spawned: they stay out.
+  on("turn.start", async ($, e, next) => {
+    const result = await next(e);
+    try {
+      const id = e.agentId;
+      if (id && !runs[id]) {
+        const i = spawning.findIndex((s) => s.prompt === (e.text ?? ""));
+        if (i >= 0) {
+          const [s] = spawning.splice(i, 1);
+          const at = await $.clock.now();
+          runs[id] = { from: at, to: null, seen: at, busy: 0, ran: true, parentId: s.parentId, ...baseOf(id) };
+          activityDirty = true;
+        }
       }
     } catch {}
-    return started;
+    return result;
   });
 
   on("session.end", async ($, e, next) => {
@@ -1244,7 +1262,8 @@ function teamTip(now) {
 
 // An agent's activity (a request or a tool call starts, +1, or ends, -1): its last trace, the
 // only one for the agents no list names (a workflow's); active again, it reopens. Only agents
-// spawned or listed count: the engine's own forks (compaction, memory) are neither.
+// spawned (known at their first turn) or listed count: the engine's own forks (compaction, memory)
+// are neither.
 function touch(id, at, step) {
   const r = runs[id];
   if (!r) return;

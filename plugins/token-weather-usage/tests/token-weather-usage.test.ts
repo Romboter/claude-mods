@@ -867,7 +867,8 @@ test("cache savings: kept in the store, back on a resumed session", async ($, on
 
 // ---------- Agents card: each running agent's latest tool call, the last batch ----------
 
-// Each request answers with the tools queued by use(); a spawn starts the agent its description names.
+// Each request answers with the tools queued by use(); a spawn starts the agent its description names,
+// whose first turn begins with the spawn's prompt, as in the engine.
 function crew(on: any, env: Record<string, string> = {}, steps = true) {
   const clock = world(on, env);
   on("session.usage", () => ({ value: { startedAt: NOW, context: { tokens: 107_000, window: 1_000_000, percent: 11 }, rateLimits: LIMITS, cost: { usd: 10 } } }));
@@ -877,6 +878,7 @@ function crew(on: any, env: Record<string, string> = {}, steps = true) {
     return { turnId: "t", index: 0, answer: "", toolUses: uses.map((name: string) => ({ name, input: { command: "SECRET=x" } })), stopReason: stop, usage: null };
   });
   on("agent.spawn", (_$: any, e: any) => ({ model: "claude-haiku-5-5", agentId: e.description }));
+  on("turn.start", (_$: any, e: any) => ({ turnId: e.turnId }));
   return { advance: (ms: number) => clock.advance(ms) };
 }
 
@@ -890,11 +892,15 @@ async function use($: any, agentId: string, tool?: string, stop = "end_turn") {
 }
 
 async function spawn($: any, ...ids: string[]) {
-  for (const id of ids) await $.agent.spawn({ tool_use_id: "workflow-1", prompt: "Work.", description: id, subagentType: "general-purpose" });
+  for (const id of ids) {
+    await $.agent.spawn({ tool_use_id: "workflow-1", prompt: "Work.", description: id, subagentType: "general-purpose" });
+    await $.turn.start({ turnId: `t-${id}`, text: "Work.", agentId: id });
+  }
 }
 
 async function spawnUnder($: any, parentAgentId: string, id: string) {
   await $.agent.spawn({ tool_use_id: "agent-1", prompt: "Work.", description: id, subagentType: "general-purpose", parentAgentId });
+  await $.turn.start({ turnId: `t-${id}`, text: "Work.", agentId: id });
 }
 
 // A subagent's request answered by engineStep's next usage.
@@ -1018,6 +1024,30 @@ test("agents: the engine's own forks (no spawn, no list) make no batch", async (
   await use($, "fork-memory", "Write");
   await clock.advance(120_000);
   expect(await agentsCard($)).not.toContain("Last batch");
+});
+
+test("agents: only a turn that begins with a spawn's prompt opens a run", async ($, on) => {
+  const clock = crew(on);
+  on("agent.list", () => ({ value: [] }));
+  await $.session.start({ source: "startup", cwd: "/tmp" } as any);
+  await spawn($, "w1", "w2");
+  // A loop whose first turn matches no spawn's prompt (as the engine's own forks): never a run.
+  await $.agent.spawn({ tool_use_id: "workflow-1", prompt: "Work.", description: "x", subagentType: "general-purpose" });
+  await $.turn.start({ turnId: "t-x", text: "Summarize the conversation.", agentId: "x" });
+  await clock.advance(5_000);
+  await use($, "w1", "Read");
+  await use($, "w2", "Read");
+  await use($, "x", "Read");
+  await clock.advance(120_000);
+  expect(await agentsCard($)).toContain("Last batch: 2 agents in 5 s\n  2.0× in parallel · 2 tool calls");
+});
+
+test("agents: the mod passes a spawn on unchanged, whatever the engine answers", async ($, on) => {
+  world(on);
+  on("agent.spawn", (_$: any, e: any) => (e.description === "refused" ? { deny: "no" } : { model: "claude-haiku-5-5", agentId: e.description }));
+  await $.session.start({ source: "startup", cwd: "/tmp" } as any);
+  expect(await $.agent.spawn({ tool_use_id: "agent-1", prompt: "Work.", description: "x", subagentType: "Explore" } as any)).toEqual({ model: "claude-haiku-5-5", agentId: "x" });
+  expect(await $.agent.spawn({ tool_use_id: "agent-2", prompt: "Work.", description: "refused", subagentType: "Explore" } as any)).toEqual({ deny: "no" });
 });
 
 test("agents: a workflow agent inside a long tool call is not ended for being quiet", async ($, on) => {
