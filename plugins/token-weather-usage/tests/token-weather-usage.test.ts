@@ -1171,8 +1171,8 @@ const FR_PARTS = ["nuit", "matin", "après-midi", "soir"];
 function frDayPart(ms: number) {
   const d = new Date(ms);
   const h = d.getHours();
-  const part = h < 6 ? 0 : h < 12 ? 1 : h < 18 ? 2 : 3;
-  return `${FR_DAYS[h < 6 ? (d.getDay() + 6) % 7 : d.getDay()]} ${FR_PARTS[part]}`;
+  if (h < 6) return `nuit de ${FR_DAYS[(d.getDay() + 6) % 7]} à ${FR_DAYS[d.getDay()]}`;
+  return `${FR_DAYS[d.getDay()]} ${FR_PARTS[h < 12 ? 1 : h < 18 ? 2 : 3]}`;
 }
 const weekOf = (used: number, daysLeft: number) => [
   { kind: "seven_day", percentUsed: used, resetsAt: new Date(NOW + daysLeft * 86_400_000).toISOString() },
@@ -1190,7 +1190,8 @@ test("7-day estimate: at the week's pace the limit runs out before the reset", a
   const pill: any = await ui.find({ type: "Text", text: `⚠ à court ${frDayPart(out)}` });
   expect(pill?.props?.color).toBe("#a8690a");
   const card = await cardOf((await band($, "desktop")).ui, "gauge-7j");
-  expect(card).toContain("À ce rythme (+70 % en 4j00h)");
+  expect(card).toContain("Au rythme de la semaine (+70 % en 4j00h)");
+  expect(card).not.toContain("Au rythme des dernières");
   expect(card).toContain("avant la remise à zéro du");
 });
 
@@ -1217,9 +1218,9 @@ test("7-day estimate: none under 15% used", async ($, on) => {
   expect(runOutText((await band($, "terminal")).texts)).toBeUndefined();
 });
 
-test("7-day estimate: the pace over the last day, red within a day", async ($, on) => {
+test("7-day estimate: the week's pace decides, the last day's shown beside it", async ($, on) => {
   const resetsAt = new Date(NOW + 3 * 86_400_000).toISOString();
-  // A day ago 30% was used: 40% in a day, the last 30% gone in 18 hours.
+  // 70% in 4 days: out in about 1.7 days. A day ago 30% was used: 40% in a day, out in 18 hours.
   world(on, {}, { week: [{ at: NOW - 86_400_000, used: 30, resetsAt }] });
   withUsage(on, [{ kind: "seven_day", percentUsed: 70, resetsAt }]);
   await $.session.start({ source: "startup", cwd: "/tmp" } as any);
@@ -1227,8 +1228,28 @@ test("7-day estimate: the pace over the last day, red within a day", async ($, o
   const text = runOutText(texts);
   expect(text?.startsWith("⚠ out ")).toBe(true);
   const pill: any = await ui.find({ type: "Text", text });
+  expect(pill?.props?.color).toBe("#a8690a");
+  const card = await cardOf((await band($, "desktop")).ui, "gauge-7d");
+  expect(card).toContain("At this week's pace (+70% in 4d00h)");
+  expect(card).toContain("At the last 1d00h's pace (+40%):");
+});
+
+test("7-day estimate: a quiet last day lasts until the reset", async ($, on) => {
+  const resetsAt = new Date(NOW + 3 * 86_400_000).toISOString();
+  world(on, {}, { week: [{ at: NOW - 86_400_000, used: 68, resetsAt }] });
+  withUsage(on, [{ kind: "seven_day", percentUsed: 70, resetsAt }]);
+  await $.session.start({ source: "startup", cwd: "/tmp" } as any);
+  expect(await cardOf((await band($, "desktop")).ui, "gauge-7d")).toContain("it would last until the reset");
+});
+
+test("7-day estimate: red within a day", async ($, on) => {
+  // 90% in 6 days: the last 10% gone in about 16 hours.
+  world(on);
+  withUsage(on, weekOf(90, 1));
+  await $.session.start({ source: "startup", cwd: "/tmp" } as any);
+  const { ui, texts } = await band($, "terminal");
+  const pill: any = await ui.find({ type: "Text", text: runOutText(texts) });
   expect(pill?.props?.color).toBe("red");
-  expect(await cardOf((await band($, "desktop")).ui, "gauge-7d")).toContain("At this pace (+40% in 1d00h)");
 });
 
 test("7-day estimate: readings are kept, at most one per half hour", async ($, on) => {

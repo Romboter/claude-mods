@@ -44,9 +44,12 @@ const TEXT = {
     weekdays: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
     dayParts: ["night", "morning", "afternoon", "evening"],
     dayPart: (day, part) => `${day} ${part}`,
+    night: (day) => `${day} night`,
     date: (day, d, m) => `${day} ${d}/${m}`,
     runOut: (when) => `⚠ out ${when}`,
-    runOutTip: (gained, over, when, time, reset) => `At this pace (+${gained} in ${over}), the 7-day limit runs out ${when} around ${time}, before the reset on ${reset}. An estimate from your recent use.`,
+    runOutTip: (gained, over, when, time, reset) => `At this week's pace (+${gained} in ${over}), the 7-day limit runs out ${when} around ${time}, before the reset on ${reset}.`,
+    recentOut: (gained, over, when, time) => `At the last ${over}'s pace (+${gained}): ${when} around ${time}.`,
+    recentLasts: (gained, over) => `At the last ${over}'s pace (+${gained}), it would last until the reset.`,
     lastPrompt: (usd) => `+$${usd.toFixed(2)}`,
     lastPrompt5h: (points) => `+${decimal(points)}% 5h`,
     toRewrite: (tokens) => `${tokens} to rewrite`,
@@ -122,9 +125,12 @@ const TEXT = {
     weekdays: ["dim.", "lun.", "mar.", "mer.", "jeu.", "ven.", "sam."],
     dayParts: ["nuit", "matin", "après-midi", "soir"],
     dayPart: (day, part) => `${day} ${part}`,
+    night: (day, next) => `nuit de ${day} à ${next}`,
     date: (day, d, m) => `${day} ${d}/${m}`,
     runOut: (when) => `⚠ à court ${when}`,
-    runOutTip: (gained, over, when, time, reset) => `À ce rythme (+${gained} en ${over}), la limite 7 jours sera atteinte ${when} vers ${time}, avant la remise à zéro du ${reset}. Estimation d’après ton usage récent.`,
+    runOutTip: (gained, over, when, time, reset) => `Au rythme de la semaine (+${gained} en ${over}), la limite 7 jours sera atteinte ${when} vers ${time}, avant la remise à zéro du ${reset}.`,
+    recentOut: (gained, over, when, time) => `Au rythme des dernières ${over} (+${gained}) : ${when} vers ${time}.`,
+    recentLasts: (gained, over) => `Au rythme des dernières ${over} (+${gained}), elle tiendrait jusqu’à la remise à zéro.`,
     lastPrompt: (usd) => `+${usd.toFixed(2).replace(".", ",")} $`,
     lastPrompt5h: (points) => `+${decimal(points).replace(".", ",")} % 5h`,
     toRewrite: (tokens) => `${tokens} à réécrire`,
@@ -196,9 +202,12 @@ const TEXT = {
     weekdays: ["вс", "пн", "вт", "ср", "чт", "пт", "сб"],
     dayParts: ["ночью", "утром", "днём", "вечером"],
     dayPart: (day, part) => `${day} ${part}`,
+    night: (day, next) => `в ночь на ${next}`,
     date: (day, d, m) => `${day} ${d}.${m}`,
     runOut: (when) => `⚠ кончится ${when}`,
-    runOutTip: (gained, over, when, time, reset) => `При таком темпе (+${gained} за ${over}) недельный лимит закончится ${when} около ${time}, до сброса ${reset}. Оценка по недавнему использованию.`,
+    runOutTip: (gained, over, when, time, reset) => `При темпе этой недели (+${gained} за ${over}) недельный лимит закончится ${when} около ${time}, до сброса ${reset}.`,
+    recentOut: (gained, over, when, time) => `При темпе последних ${over} (+${gained}): ${when} около ${time}.`,
+    recentLasts: (gained, over) => `При темпе последних ${over} (+${gained}) лимита хватит до сброса.`,
     lastPrompt: (usd) => `+${usd.toFixed(2).replace(".", ",")} $`,
     lastPrompt5h: (points) => `+${decimal(points).replace(".", ",")}% 5ч`,
     toRewrite: (tokens) => `${tokens} к перезаписи`,
@@ -860,19 +869,26 @@ function runOutOf(limit, used, now) {
   if (limit.kind !== "seven_day") return null;
   const resetMs = Date.parse(limit.resetsAt ?? "");
   if (!Number.isFinite(resetMs)) return null;
-  if (SPANS.seven_day - (resetMs - now) < OUT_MIN_ELAPSED || used < OUT_MIN_USED || used >= 100) return null;
-  // The reading closest to a day ago, at least six hours old; otherwise the week's start.
+  const start = resetMs - SPANS.seven_day;
+  if (now - start < OUT_MIN_ELAPSED || used < OUT_MIN_USED || used >= 100) return null;
+  // The week's pace decides, as Claude's own usage page does.
+  const rate = used / (now - start);
+  if (!(rate > 0)) return null;
+  const at = now + (100 - used) / rate;
+  if (at >= resetMs) return null;
+  return { at, left: at - now, gained: used, over: now - start, resetMs, recent: recentPace(limit, used, now, resetMs) };
+}
+
+// The pace since the reading closest to a day ago (at least six hours old), shown beside the week's.
+function recentPace(limit, used, now, resetMs) {
   let base = null;
   for (const s of week) {
     if (s.resetsAt !== limit.resetsAt || now - s.at < PACE_MIN_SPAN) continue;
     if (!base || Math.abs(now - s.at - PACE_SPAN) < Math.abs(now - base.at - PACE_SPAN)) base = s;
   }
-  const from = base ?? { at: resetMs - SPANS.seven_day, used: 0 };
-  const rate = (used - from.used) / (now - from.at);
-  if (!(rate > 0)) return null;
-  const at = now + (100 - used) / rate;
-  if (at >= resetMs) return null;
-  return { at, left: at - now, gained: used - from.used, over: now - from.at, resetMs };
+  if (!base || !(used > base.used)) return null;
+  const at = now + (100 - used) * (now - base.at) / (used - base.used);
+  return { at: at < resetMs ? at : null, gained: used - base.used, over: now - base.at };
 }
 
 // "Fri evening": the hours after midnight belong to the day before ("Fri night").
@@ -880,8 +896,14 @@ function dayPartOf(ms) {
   const d = new Date(ms);
   const h = d.getHours();
   const part = h < 6 ? 0 : h < 12 ? 1 : h < 18 ? 2 : 3;
-  const day = h < 6 ? (d.getDay() + 6) % 7 : d.getDay();
-  return T.dayPart(T.weekdays[day], T.dayParts[part]);
+  if (h < 6) return T.night(T.weekdays[(d.getDay() + 6) % 7], T.weekdays[d.getDay()]);
+  return T.dayPart(T.weekdays[d.getDay()], T.dayParts[part]);
+}
+
+function recentLine(r) {
+  if (!r) return "";
+  const gained = T.percent(Math.round(r.gained));
+  return r.at ? T.recentOut(gained, duration(r.over), dayPartOf(r.at), clockTime(r.at)) : T.recentLasts(gained, duration(r.over));
 }
 
 function dateOf(ms) {
@@ -1469,7 +1491,7 @@ function gaugeBlock({ Box, Text, Svg }, mode, g) {
   const tip = g.resetAt
     ? T.resetsAt(g.resetAt)
     : g.out
-      ? T.runOutTip(T.percent(Math.round(g.out.gained)), duration(g.out.over), dayPartOf(g.out.at), clockTime(g.out.at), dateOf(g.out.resetMs))
+      ? [T.runOutTip(T.percent(Math.round(g.out.gained)), duration(g.out.over), dayPartOf(g.out.at), clockTime(g.out.at), dateOf(g.out.resetMs)), recentLine(g.out.recent)].filter(Boolean).join("\n")
       : "";
   return { key: "gauge-" + g.label, tint: TINTS[g.kind] ?? TINTS.spend_limit, parts, tip };
 }
