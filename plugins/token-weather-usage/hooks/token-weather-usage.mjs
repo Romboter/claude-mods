@@ -71,11 +71,6 @@ const TEXT = {
       missed: (share, cause, tokens, surcharge) =>
         `This message read only ${share} from the cache (${cause}): it wrote ${tokens} tokens again${surcharge ? `, ${surcharge} more than a message served by the cache` : ""}.`,
       compacted: "Compacted: the next message writes a new, smaller cache.",
-      idleAt: (time, left) => `Idle compaction around ${time}, in ${left}, if no message comes first.`,
-      idleOff: "Idle compaction: not yet enabled for your account by Anthropic.",
-      idleDisabled: "Idle compaction: turned off in settings (idleCompaction).",
-      idleTtl: "Idle compaction: needs a 1-hour cache.",
-      idleSmall: (min, tokens) => `Idle compaction: from ${min}; this thread is at ${tokens}.`,
     },
     agents: (n) => (n === 1 ? "1 agent" : `${n} agents`),
     agentsRunning: (running, n) => `${running} running · ${n}`,
@@ -150,11 +145,6 @@ const TEXT = {
       missed: (share, cause, tokens, surcharge) =>
         `Ce message n'a lu que ${share} depuis le cache (${cause}) : il a réécrit ${tokens} tokens${surcharge ? `, ${surcharge} de plus qu'un message servi par le cache` : ""}.`,
       compacted: "Compacté : le prochain message écrira un cache neuf, plus petit.",
-      idleAt: (time, left) => `Compaction à l'arrêt vers ${time}, dans ${left}, si aucun message n'arrive avant.`,
-      idleOff: "Compaction à l'arrêt : pas encore ouverte à ton compte par Anthropic.",
-      idleDisabled: "Compaction à l'arrêt : coupée dans les réglages (idleCompaction).",
-      idleTtl: "Compaction à l'arrêt : il faut un cache d'une heure.",
-      idleSmall: (min, tokens) => `Compaction à l'arrêt : dès ${min} ; ce fil est à ${tokens}.`,
     },
     agents: (n) => (n === 1 ? "1 agent" : `${n} agents`),
     agentsRunning: (running, n) => `${running} en cours · ${n}`,
@@ -227,11 +217,6 @@ const TEXT = {
       missed: (share, cause, tokens, surcharge) =>
         `Это сообщение прочитало из кэша только ${share} (${cause}): ${tokens} токенов записаны заново${surcharge ? `, на ${surcharge} дороже, чем сообщение из кэша` : ""}.`,
       compacted: "Сжато: следующее сообщение запишет новый, меньший кэш.",
-      idleAt: (time, left) => `Сжатие при простое около ${time}, через ${left}, если не придёт сообщение.`,
-      idleOff: "Сжатие при простое: Anthropic ещё не включила его для вашего аккаунта.",
-      idleDisabled: "Сжатие при простое: выключено в настройках (idleCompaction).",
-      idleTtl: "Сжатие при простое: нужен кэш на 1 час.",
-      idleSmall: (min, tokens) => `Сжатие при простое: от ${min}; в этой ветке ${tokens}.`,
     },
     agents: (n) => `${n} ${plural(n, "агент", "агента", "агентов")}`,
     agentsRunning: (running, n) => `${running} в работе · ${n}`,
@@ -453,6 +438,7 @@ let promptBase = null;
 // same time count in it), and the reading it started from.
 let lastPrompt5h = null;
 let promptBase5h = null;
+let promptReset5h = null;
 
 // Subagents running now: { id, description, type }.
 let agents = [];
@@ -464,6 +450,8 @@ let team = {};
 // ({ from, to, seen, busy, ran, parentId }): the agents card's running lines and last batch. Kept in
 // memory only. After agentpane (xuanji86/claude-agentpane, MIT).
 let activity = {};
+// Agents whose last response asked for tools still running.
+let waiting = {};
 let runs = {};
 // The runs that ended before their agent ran again (a teammate woken, an agent resumed), each in its
 // own batch: { id, from, to, ran, parentId, calls, usd, priced }.
@@ -546,13 +534,13 @@ export function register(on, options) {
     savedUsd = 0;
     team = {};
     activity = {};
+    waiting = {};
     runs = {};
     past = [];
     lastPrompt = null;
     lastPrompt5h = null;
     cacheKey = "";
     cacheEnv = await cacheEnvOf($);
-    await refreshIdle($, await $.clock.now());
     turnsKey = TURNS_PREFIX + (await $.session.id());
     await restoreTurns($);
     const usage = await $.session.usage();
@@ -560,6 +548,7 @@ export function register(on, options) {
     cost = usage.cost?.usd ?? null;
     promptBase = cost;
     promptBase5h = fiveHourOf(usage.rateLimits);
+    promptReset5h = fiveHourReset(usage.rateLimits);
     agents = [];
     agentsKey = "";
     await refreshAgents($);
@@ -571,7 +560,6 @@ export function register(on, options) {
     // Every minute: elapsed time moves on, and another session may have measured something newer.
     ticker = $.clock.every(MINUTE, async () => {
       await adoptShared($);
-      await refreshIdle($, await $.clock.now());
       $.ui.invalidate("ui.render");
     });
     // The cache countdown: a redraw only when its text changes.
@@ -587,29 +575,6 @@ export function register(on, options) {
     });
     $.ui.invalidate("ui.render");
     return next(e);
-  });
-
-  // A subagent's tool call: its latest, for its running line in the agents card.
-  on("tool.call", async ($, e, next) => {
-    const id = e.agentId;
-    // Only agents spawned or listed: the engine's own forks (compaction, memory) are neither.
-    if (!id || !runs[id]) return next(e);
-    // Never in the way of the call: a failure here only loses a line of the card.
-    try {
-      // First the run (a new one starts before this call, which then counts in it), then the call.
-      touch(id, await $.clock.now(), 1);
-      const a = (activity[id] ??= { text: "", calls: 0 });
-      a.text = toolText(e.tool, e);
-      a.calls++;
-      activityDirty = true;
-    } catch {}
-    try {
-      return await next(e);
-    } finally {
-      try {
-        touch(id, await $.clock.now(), -1);
-      } catch {}
-    }
   });
 
   // An agent's start, ahead of the next list.
@@ -639,17 +604,39 @@ export function register(on, options) {
   // A subagent's request goes to its line in the agents card: model, effort, tokens, cost.
   on("turn.step", async function* ($, e, next) {
     if (e.agentId) {
+      const id = e.agentId;
       const at = await $.clock.now();
-      touch(e.agentId, at, 1);
+      // The tools the last response asked for have run: the agent is back at the model.
+      if (waiting[id]) {
+        waiting[id] = false;
+        touch(id, at, -1);
+      }
+      touch(id, at, 1);
       let result;
       try {
         result = yield* next(e);
       } finally {
         try {
-          touch(e.agentId, await $.clock.now(), -1);
+          touch(id, await $.clock.now(), -1);
         } catch {}
       }
-      if (result?.usage) recordAgentStep(e.agentId, at, result.usage, e.model, e.effort);
+      if (result?.usage) recordAgentStep(id, at, result.usage, e.model, e.effort);
+      // The tools the response asks for, by name only: the card never shows their arguments.
+      // Read from the response, the mod never stands in a tool call's way.
+      try {
+        const uses = result?.toolUses ?? [];
+        if (runs[id] && uses.length) {
+          const a = (activity[id] ??= { text: "", calls: 0 });
+          a.text = toolText(uses[uses.length - 1].name);
+          a.calls += uses.length;
+          activityDirty = true;
+          // Still at work while they run, however long.
+          if (result.stopReason === "tool_use") {
+            waiting[id] = true;
+            touch(id, await $.clock.now(), 1);
+          }
+        }
+      } catch {}
       return result;
     }
     const at = await $.clock.now();
@@ -668,6 +655,10 @@ export function register(on, options) {
     const result = await next(e);
     // A subagent's turn: it may have just finished.
     if (e.agentId) {
+      if (waiting[e.agentId]) {
+        waiting[e.agentId] = false;
+        touch(e.agentId, await $.clock.now(), -1);
+      }
       await refreshAgents($);
       nameTeam();
       await saveTurns($);
@@ -682,11 +673,14 @@ export function register(on, options) {
         if (promptBase !== null && cost >= promptBase) lastPrompt = cost - promptBase;
         promptBase = cost;
       }
-      // A window that reset in between gives no share.
+      // A window that reset in between gives no share, even when its first reading is not lower.
       const now5h = fiveHourOf(usage.rateLimits);
       if (now5h !== null) {
-        lastPrompt5h = promptBase5h !== null && now5h >= promptBase5h ? Math.round((now5h - promptBase5h) * 10) / 10 : null;
+        const reset = fiveHourReset(usage.rateLimits);
+        const same = promptReset5h === null || reset === null || Math.abs(reset - promptReset5h) < MINUTE;
+        lastPrompt5h = promptBase5h !== null && same && now5h >= promptBase5h ? Math.round((now5h - promptBase5h) * 10) / 10 : null;
         promptBase5h = now5h;
+        promptReset5h = reset;
       }
       await saveTurns($);
       $.ui.invalidate("ui.render");
@@ -937,6 +931,12 @@ function fiveHourOf(list) {
   return w && Number.isFinite(w.percentUsed) ? w.percentUsed : null;
 }
 
+// When the 5-hour window resets, in ms; null unknown.
+function fiveHourReset(list) {
+  const ms = Date.parse((list ?? []).find((l) => l.kind === "five_hour")?.resetsAt ?? "");
+  return Number.isFinite(ms) ? ms : null;
+}
+
 // 6.5, 12, 0.4: one decimal under 10.
 function decimal(x) {
   return x >= 10 ? String(Math.round(x)) : String(Math.round(x * 10) / 10);
@@ -963,54 +963,6 @@ async function cacheEnvOf($) {
     ttl: await read(() => $.env.get("CLAUDE_CODE_PROMPT_CACHE_TTL")),
     enable1h: isOn(await read(() => $.env.get("ENABLE_PROMPT_CACHING_1H"))),
   };
-}
-
-// Idle compaction: Claude Code compacts a large idle conversation shortly before its 1-hour cache
-// lapses, once Anthropic enables it for the account (the tengu_sunny_locket flag Claude Code caches
-// in ~/.claude.json). Read every 10 minutes: { mode, minTokens, fraction, disabled }; null unknown.
-const IDLE_MIN = 200000;
-const IDLE_FLOOR = 100000;
-const IDLE_FRACTION = 0.9;
-const IDLE_REFRESH = 10 * MINUTE;
-let idle = null;
-let idleRead = 0;
-
-async function refreshIdle($, now) {
-  if (idle && now - idleRead < IDLE_REFRESH) return;
-  idleRead = now;
-  try {
-    const home = await $.env.get("HOME");
-    if (!home) return;
-    const flag = JSON.parse(await $.fs.read(`${home}/.claude.json`))?.cachedGrowthBookFeatures?.tengu_sunny_locket;
-    let disabled = false;
-    try {
-      disabled = JSON.parse(await $.fs.read(`${home}/.claude/settings.json`))?.idleCompaction === false;
-    } catch {
-      // No settings file: on by default.
-    }
-    const envMin = Number(await $.env.get("CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS"));
-    const min = Number.isFinite(envMin) && envMin > 0 ? envMin : flag?.minTokens;
-    const fraction = flag?.fireAtFraction;
-    idle = {
-      mode: flag?.mode === "compact" ? "compact" : "off",
-      minTokens: Number.isFinite(min) ? Math.max(IDLE_FLOOR, min) : IDLE_MIN,
-      fraction: Number.isFinite(fraction) ? Math.min(0.95, Math.max(0.5, fraction)) : IDLE_FRACTION,
-      disabled,
-    };
-  } catch {
-    // Unreadable: say nothing rather than guess.
-  }
-}
-
-// The hover card's idle compaction line for a warm cache, or null.
-function idleLine(now, ttl, tokens) {
-  if (!idle) return null;
-  if (idle.mode !== "compact") return T.tips.idleOff;
-  if (idle.disabled) return T.tips.idleDisabled;
-  if (ttl !== TTL["1h"]) return T.tips.idleTtl;
-  if (tokens < idle.minTokens) return T.tips.idleSmall(short(idle.minTokens), short(tokens));
-  const at = cache.at + idle.fraction * ttl;
-  return at > now ? T.tips.idleAt(clockTime(at), duration(at - now)) : null;
 }
 
 function isOn(value) {
@@ -1129,8 +1081,6 @@ function cacheState(now) {
   if (soon) {
     const stake = T.atStake(costs ? T.money(costs.rewrite) : short(tokens));
     const tip = [T.tips.soon(expiry, short(tokens), costs && { read: approx(costs.read), rewrite: approx(costs.rewrite) })];
-    const idleNote = idleLine(now, ttl, tokens);
-    if (idleNote) tip.push(idleNote);
     return { tone: "fast", ...shown, urgent: true, stake, tip: tip.join("\n") };
   }
   const tip = [T.tips.warm(expiry, ttl === TTL["1h"], seenTtl !== null), T.tips.lastRead(T.percent(share), short(cache.read ?? 0))];
@@ -1138,8 +1088,6 @@ function cacheState(now) {
     tip.push(T.tips.costs(approx(costs.read), approx(costs.rewrite)));
     if (savedUsd >= 0.01) tip.push(T.tips.saved(approx(savedUsd)));
   }
-  const idleNote = idleLine(now, ttl, tokens);
-  if (idleNote) tip.push(idleNote);
   return { tone: "calm", ...shown, urgent: false, tip: tip.join("\n") };
 }
 
@@ -1245,7 +1193,8 @@ function teamSize() {
 function teamTip(now) {
   const list = Object.values(team);
   const lines = [T.team.title(teamSize(), agents.length)];
-  const agentsUsd = list.reduce((sum, a) => sum + (a.priced ? a.usd : 0), 0);
+  // What is known of each agent's cost, even one with an unpriced request: never the main thread's.
+  const agentsUsd = list.reduce((sum, a) => sum + a.usd, 0);
   const mainModel = cache?.model ?? "";
   // The main thread: the session's cost less its agents' (its own requests are not all seen here).
   if (cost !== null) {
@@ -1369,23 +1318,9 @@ function span(ms) {
   return duration(ms);
 }
 
-// A tool call in Claude Code's words, cut to fit the card's line ("  ↳ <text> · 12 calls" within 55
-// characters): "Bash(npm test)", "Read(register.tsx)", "github:list_issues". After agentpane's
-// toolParts (MIT).
-const TOOL_TEXT = 38;
-export function toolText(tool, e) {
-  const src = e?.input && typeof e.input === "object" ? e.input : e;
-  const s = (k) => (typeof src?.[k] === "string" ? src[k] : "");
-  const base = (p) => p.split(/[\\/]/).pop() ?? p;
-  const arg =
-    tool === "Bash" ? s("command")
-    : ["Read", "Write", "Edit", "NotebookEdit"].includes(tool) ? base(s("file_path") || s("notebook_path"))
-    : tool === "Grep" || tool === "Glob" ? s("pattern")
-    : tool === "WebFetch" ? s("url")
-    : tool === "WebSearch" ? s("query")
-    : tool === "Agent" ? s("description")
-    : tool === "Skill" ? s("skill")
-    : "";
+// A tool's name as the card writes it, cut to fit its line: "Bash", "Read", "github:list_issues".
+// Never its arguments. After agentpane's toolParts (MIT).
+export function toolText(tool) {
   let name = String(tool ?? "");
   if (name.startsWith("mcp__")) {
     // "mcp__github__list_issues" → "github:list_issues"; a connector's id (a UUID) says nothing, its
@@ -1395,9 +1330,7 @@ export function toolText(tool, e) {
     const room = 24 - [...action].length - 1;
     name = /^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(server) || !server ? action : room >= 4 ? `${fit(server, room)}:${action}` : action;
   }
-  name = fit(name, 24);
-  const one = masked(arg.replace(/\s+/g, " ").trim());
-  return one ? `${name}(${fit(one, Math.max(8, TOOL_TEXT - [...name].length - 2))})` : name;
+  return fit(name, 24);
 }
 
 // The text cut to n characters, never halfway through an emoji, "…" last.
@@ -1427,30 +1360,6 @@ const KNOWN_TOKENS = [
   /\bdop_v1_[a-f0-9]{40,}/g,
   /\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g,
 ];
-
-// A secret in a tool's argument as "•••": the card may be shown or shared. An environment variable
-// (API_KEY=…), a flag (--token …, curl -u user:…, mysql -p…), a header (Authorization, Cookie), a
-// URL's user:password@ or query string, a known token shape. A word that only contains "key" or
-// "auth" (monkey=1, --author=eric) stays.
-function masked(text) {
-  // The card shows a few dozen characters: no need to scan a long command whole.
-  let t = text.slice(0, 2000)
-    .replace(/-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*/g, "•••")
-    .replace(/(\b[a-z][a-z0-9+.-]*:\/\/[^\s/:@]+:)[^\s@/]+@/gi, "$1•••@")
-    .replace(/(\bhttps?:\/\/[^\s?#"']*)[?#][^\s"']*/gi, "$1?…")
-    .replace(/\b(Authorization\s*[:=]\s*)(?:[A-Za-z]+\s+)?[^\s"']+/gi, "$1•••")
-    .replace(/\b((?:Set-)?Cookie\s*:\s*)[^"']+/gi, "$1•••")
-    .replace(/\b(Bearer\s+["']?)[^\s"']{6,}/gi, "$1•••")
-    .replace(/\b((?:X-)?Api-Key\s*:\s*)[^\s"']+/gi, "$1•••")
-    .replace(/(\s--?u(?:ser)?[\s=]+[^\s:]+:)[^\s"']+/g, "$1•••")
-    .replace(/(\s--(?:password|passwd|pass|token|api-key|apikey|secret|client-secret|auth-token|access-token|otp|ftp-password)[\s=]+)("[^"]*"|'[^']*'|[^\s"']+)/gi, "$1•••")
-    .replace(/(\b(?:mysql|mysqldump|mariadb)\b[^|;&]*?\s-p)('[^']*'|"[^"]*"|[^\s"']+)/g, "$1•••")
-    .replace(/(\b(?:sshpass|docker\s+login|podman\s+login|redis-cli)\b[^|;&]*?\s-[pa]\s+)('[^']*'|"[^"]*"|\S+)/g, "$1•••")
-    .replace(/\b([A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|AUTH|CREDENTIALS?)[A-Z0-9_]*\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s"']+)/g, "$1•••")
-    .replace(/((?:^|[\s"'{,;&?-])(?:[A-Za-z0-9]+[-_]){0,3}(?:api[-_]?key|apikey|token|secret|password|passwd|auth[-_]?token|access[-_]?key|private[-_]?key|client[-_]?secret)(?:\s*=|["']\s*:)\s*)("[^"]*"|'[^']*'|[^\s"'&,;}]+)/gi, "$1•••");
-  for (const re of KNOWN_TOKENS) t = t.replace(re, "•••");
-  return t;
-}
 
 // The cache block as the terminal writes it: "cache 8 min · $2.32 at stake".
 function cacheText(state) {
@@ -1483,7 +1392,8 @@ function gaugeBlock({ Box, Text, Svg }, mode, g) {
   }
   else if (g.when && mode === "text") parts.push(Text({ key: "d", dimColor: true, children: `· ${g.when}` }));
   // The 7-day limit running out before the reset: amber, red within a day.
-  if (g.out) {
+  // Not when the line is too narrow for details: the warning would make it wrap.
+  if (g.out && mode !== "none") {
     const color = g.out.left <= OUT_ALERT ? TONES.alert.text : TONES.fast.text;
     parts.push(divider(Text, "o"), Text({ key: "w", bold: true, color, children: T.runOut(dayPartOf(g.out.at)) }));
   }

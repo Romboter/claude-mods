@@ -324,7 +324,8 @@ function engineStep(on: any, usages: Record<string, unknown>[]) {
   let call = 0;
   on("turn.step", async function* () {
     const usage = usages[Math.min(call++, usages.length - 1)];
-    return { turnId: "t", index: 0, answer: "", toolUses: [], stopReason: "end_turn", usage };
+    const queued = next.shift();
+    return { turnId: "t", index: 0, answer: "", toolUses: (queued?.uses ?? []).map((name) => ({ name, input: {} })), stopReason: queued?.stop ?? "end_turn", usage };
   });
 }
 
@@ -866,15 +867,26 @@ test("cache savings: kept in the store, back on a resumed session", async ($, on
 
 // ---------- Agents card: each running agent's latest tool call, the last batch ----------
 
-// A "Slow" tool call answers only once released; a spawn starts the agent its description names.
-function crew(on: any, env: Record<string, string> = {}) {
+// Each request answers with the tools queued by use(); a spawn starts the agent its description names.
+function crew(on: any, env: Record<string, string> = {}, steps = true) {
   const clock = world(on, env);
-  const slow: Array<() => void> = [];
   on("session.usage", () => ({ value: { startedAt: NOW, context: { tokens: 107_000, window: 1_000_000, percent: 11 }, rateLimits: LIMITS, cost: { usd: 10 } } }));
   on("turn.complete", () => ({ text: "" }));
-  on("tool.call", (_$: any, e: any) => (e.tool === "Slow" ? new Promise((done) => slow.push(() => done({ result: { text: "ok" } }))) : { result: { text: "ok" } }));
+  if (steps) on("turn.step", async function* () {
+    const { uses, stop } = next.shift() ?? { uses: [], stop: "end_turn" };
+    return { turnId: "t", index: 0, answer: "", toolUses: uses.map((name: string) => ({ name, input: { command: "SECRET=x" } })), stopReason: stop, usage: null };
+  });
   on("agent.spawn", (_$: any, e: any) => ({ model: "claude-haiku-5-5", agentId: e.description }));
-  return { advance: (ms: number) => clock.advance(ms), release: () => slow.splice(0).forEach((done) => done()) };
+  return { advance: (ms: number) => clock.advance(ms) };
+}
+
+// The tools a subagent's response asks for; "tool_use" leaves the agent waiting on them.
+const next: Array<{ uses: string[]; stop: string }> = [];
+async function use($: any, agentId: string, tool?: string, stop = "end_turn") {
+  next.push({ uses: tool ? [tool] : [], stop });
+  const stream = $.turn.step({ turnId: "t", index: 0, model: "claude-haiku-5-5", effort: "medium", agentId, messageCount: 2 });
+  for await (const _ of stream) {
+  }
 }
 
 async function spawn($: any, ...ids: string[]) {
@@ -894,50 +906,15 @@ async function agentStep($: any, agentId: string, model = "claude-haiku-5-5") {
 
 const agentsCard = async ($: any) => String(await cardOf((await band($, "desktop")).ui, "agents"));
 
-test("agents: a tool call in Claude Code's words, cut to fit the card", () => {
-  expect(toolText("Bash", { command: "npm   test" })).toBe("Bash(npm test)");
-  expect(toolText("Read", { file_path: "/a/b/register.tsx" })).toBe("Read(register.tsx)");
-  expect(toolText("mcp__github__list_issues", {})).toBe("github:list_issues");
-  expect(toolText("Bash", { input: { command: "x".repeat(60) } })).toBe(`Bash(${"x".repeat(31)}…)`);
+test("agents: a tool's name in Claude Code's words, never its arguments", () => {
+  expect(toolText("Bash")).toBe("Bash");
+  expect(toolText("mcp__github__list_issues")).toBe("github:list_issues");
   // A connector's UUID says nothing; a long server name gives way to the tool's.
-  expect(toolText("mcp__8377b461-f34f-4b2d-a906-1f52a65d3dc1__get-product", {})).toBe("get-product");
-  expect(toolText("mcp__claude-in-chrome__javascript_tool", {})).toBe("claude-…:javascript_tool");
-  // Cut on characters, never inside an emoji.
-  expect(toolText("Bash", { command: `${"x".repeat(30)}😀😀😀` })).toBe(`Bash(${"x".repeat(30)}😀…)`);
-  // The card's line stays within 55 characters.
+  expect(toolText("mcp__8377b461-f34f-4b2d-a906-1f52a65d3dc1__get-product")).toBe("get-product");
+  expect(toolText("mcp__claude-in-chrome__javascript_tool")).toBe("claude-…:javascript_tool");
   for (const tool of ["mcp__claude-in-chrome__javascript_tool", "mcp__plugin_pdf-viewer_pdf__display_pdf", "Bash"]) {
-    expect(`  ↳ ${toolText(tool, { command: "y".repeat(80), url: "https://example.com/" + "z".repeat(80) })} · 123 вызова`.length).toBeLessThanOrEqual(55);
+    expect(`  ↳ ${toolText(tool)} · 123 вызова`.length).toBeLessThanOrEqual(55);
   }
-});
-
-test("agents: a secret a command names stays hidden", () => {
-  const bash = (command: string) => toolText("Bash", { command });
-  expect(bash("API_KEY=abc123 npm publish")).toBe("Bash(API_KEY=••• npm publish)");
-  expect(bash("curl -H 'Bearer abcdefgh.ijk'")).toBe("Bash(curl -H 'Bearer •••')");
-  expect(bash(`gh auth ${"ghp_" + "a".repeat(36)}`)).toBe("Bash(gh auth •••)");
-  expect(bash(`x ${"sk-ant-api03-" + "b".repeat(24)}`)).toBe("Bash(x •••)");
-  expect(bash("curl -H 'Authorization: Basic dXNlcjpw'")).toBe("Bash(curl -H 'Authorization: •••')");
-  expect(bash("curl -u bob:hunter2 x")).toBe("Bash(curl -u bob:••• x)");
-  expect(bash("tool --password hunter2")).toBe("Bash(tool --password •••)");
-  expect(bash("mysql -phunter2 db")).toBe("Bash(mysql -p••• db)");
-  expect(toolText("WebFetch", { url: "https://bob:pw@h.io/a?token=x" })).toBe("WebFetch(https://bob:•••@h.io/a?…)");
-  expect(bash(`{"api_key": "abc123"}`)).toBe(`Bash({"api_key": •••})`);
-  expect(bash("sshpass -p hunter2 ssh h")).toBe("Bash(sshpass -p ••• ssh h)");
-  expect(bash("docker login -p pw123 reg")).toBe("Bash(docker login -p ••• reg)");
-  expect(bash("npm publish --otp 123456")).toBe("Bash(npm publish --otp •••)");
-  expect(bash("mysql -p'S3cret!' db")).toBe("Bash(mysql -p••• db)");
-  expect(bash("curl -H 'bearer abcdefgh'")).toBe("Bash(curl -H 'bearer •••')");
-  // Ordinary words stay: a title, a commit message.
-  expect(toolText("Agent", { description: "Token validation audit" })).toBe("Agent(Token validation audit)");
-  expect(toolText("WebSearch", { query: "Basic authentication guide" })).toBe("WebSearch(Basic authentication guide)");
-  expect(bash("git commit -m 'token: refresh'")).toBe("Bash(git commit -m 'token: refresh')");
-  // Words that only contain "key" or "auth" stay.
-  expect(bash("git log --author=eric")).toBe("Bash(git log --author=eric)");
-  expect(bash("monkey=1 make")).toBe("Bash(monkey=1 make)");
-  // A long command is not scanned whole.
-  const started = performance.now();
-  toolText("Bash", { command: "a".repeat(200_000) });
-  expect(performance.now() - started).toBeLessThan(200);
 });
 
 test("agents: a start more than 30 s after everything before it had ended opens a new batch", () => {
@@ -963,22 +940,24 @@ test("agents: each running agent's latest tool call, then the batch's receipt", 
   ];
   on("agent.list", () => ({ value: list }));
   await $.session.start({ source: "startup", cwd: "/tmp" } as any);
-  await ($ as any).tool.call({ tool: "Bash", command: "npm test", agentId: "a" });
-  await ($ as any).tool.call({ tool: "Bash", command: "npm run lint", agentId: "a" });
-  await ($ as any).tool.call({ tool: "Read", file_path: "/x/y/report.md", agentId: "b" });
+  await use($, "a", "Bash");
+  await use($, "a", "Bash");
+  await use($, "b", "Read");
   // The main thread's own calls draw no line.
-  await ($ as any).tool.call({ tool: "Read", file_path: "/x/y/main.md" });
+  await use($, "", "Glob");
   const running = String(await cardOf((await band($, "desktop")).ui, "agents"));
-  expect(running).toContain("Running: general-purpose · “Sum up the README” · < 1 min\n  ↳ Bash(npm run lint) · 2 calls");
-  expect(running).toContain("  ↳ Read(report.md) · 1 call");
-  expect(running).not.toContain("main.md");
+  expect(running).toContain("Running: general-purpose · “Sum up the README” · < 1 min\n  ↳ Bash · 2 calls");
+  expect(running).toContain("  ↳ Read · 1 call");
+  // Never a tool's arguments, nor the main thread's own calls.
+  expect(running).not.toContain("SECRET");
+  expect(running).not.toContain("Glob");
   expect(running).not.toContain("Last batch");
   // b's last call a minute in, a's at 1 min 50; then both end and the 10-second ticker reads the
   // list again: each ends at its last trace, not at that reading.
   await clock.advance(60_000);
-  await ($ as any).tool.call({ tool: "Read", file_path: "/x/y/notes.md", agentId: "b" });
+  await use($, "b", "Read");
   await clock.advance(50_000);
-  await ($ as any).tool.call({ tool: "Bash", command: "git status", agentId: "a" });
+  await use($, "a", "Bash");
   list = list.map((a) => ({ ...a, status: "completed" }));
   await clock.advance(10_000);
   const done = await agentsCard($);
@@ -998,10 +977,10 @@ for (const [lang, receipt] of [
     on("agent.list", () => ({ value: [] }));
     await $.session.start({ source: "startup", cwd: "/tmp" } as any);
     await spawn($, "w1", "w2");
-    await ($ as any).tool.call({ tool: "Grep", pattern: "TODO", agentId: "w1" });
-    await ($ as any).tool.call({ tool: "Glob", pattern: "**/*.md", agentId: "w2" });
+    await use($, "w1", "Grep");
+    await use($, "w2", "Glob");
     await clock.advance(20_000);
-    await ($ as any).tool.call({ tool: "Read", file_path: "/r/README.md", agentId: "w1" });
+    await use($, "w1", "Read");
     await clock.advance(30_000);
     expect(String(await cardOf((await band($, "desktop")).ui, "agents"))).not.toContain(receipt.split(" ")[0] + " " + receipt.split(" ")[1]);
     await clock.advance(50_000);
@@ -1017,13 +996,13 @@ test("agents: one waiting on its own agents stays in the batch until it ends", a
   ];
   on("agent.list", () => ({ value: list }));
   await $.session.start({ source: "startup", cwd: "/tmp" } as any);
-  await ($ as any).tool.call({ tool: "Read", file_path: "/x/plan.md", agentId: "a" });
+  await use($, "a", "Read");
   await clock.advance(10_000);
-  await ($ as any).tool.call({ tool: "Read", file_path: "/x/shot.png", agentId: "b" });
+  await use($, "b", "Read");
   list = [{ ...list[0], status: "waiting" }, { ...list[1], status: "completed" }];
   await clock.advance(70_000);
   expect(await agentsCard($)).not.toContain("Last batch");
-  await ($ as any).tool.call({ tool: "Write", file_path: "/x/review.md", agentId: "a" });
+  await use($, "a", "Write");
   list = list.map((a) => ({ ...a, status: "completed" }));
   await clock.advance(10_000);
   expect(await agentsCard($)).toContain("Last batch: 2 agents in 1 min 20\n  3 tool calls");
@@ -1033,10 +1012,10 @@ test("agents: the engine's own forks (no spawn, no list) make no batch", async (
   const clock = crew(on);
   on("agent.list", () => ({ value: [] }));
   await $.session.start({ source: "startup", cwd: "/tmp" } as any);
-  await ($ as any).tool.call({ tool: "Read", file_path: "/m/MEMORY.md", agentId: "fork-memory" });
-  await ($ as any).tool.call({ tool: "Read", file_path: "/m/notes.md", agentId: "fork-compact" });
+  await use($, "fork-memory", "Read");
+  await use($, "fork-compact", "Read");
   await clock.advance(20_000);
-  await ($ as any).tool.call({ tool: "Write", file_path: "/m/MEMORY.md", agentId: "fork-memory" });
+  await use($, "fork-memory", "Write");
   await clock.advance(120_000);
   expect(await agentsCard($)).not.toContain("Last batch");
 });
@@ -1046,13 +1025,12 @@ test("agents: a workflow agent inside a long tool call is not ended for being qu
   on("agent.list", () => ({ value: [] }));
   await $.session.start({ source: "startup", cwd: "/tmp" } as any);
   await spawn($, "w1", "w2");
-  await ($ as any).tool.call({ tool: "Grep", pattern: "TODO", agentId: "w2" });
-  const long = ($ as any).tool.call({ tool: "Slow", agentId: "w1" });
+  await use($, "w2", "Grep");
+  await use($, "w1", "Slow", "tool_use");
   await clock.advance(150_000);
   // w2 has long been quiet, w1 still in its call: the batch is not over.
   expect(await agentsCard($)).not.toContain("Last batch");
-  clock.release();
-  await long;
+  await use($, "w1");
   await clock.advance(70_000);
   expect(await agentsCard($)).toContain("Last batch: 2 agents in 2 min 30\n  2 tool calls");
 });
@@ -1065,21 +1043,21 @@ test("agents: an agent resumed later starts a new run, in a new batch", async ($
   ];
   on("agent.list", () => ({ value: list }));
   await $.session.start({ source: "startup", cwd: "/tmp" } as any);
-  await ($ as any).tool.call({ tool: "Read", file_path: "/x/a.log", agentId: "a" });
-  await ($ as any).tool.call({ tool: "Read", file_path: "/x/b.ts", agentId: "b" });
+  await use($, "a", "Read");
+  await use($, "b", "Read");
   await clock.advance(20_000);
-  await ($ as any).tool.call({ tool: "Read", file_path: "/x/a2.log", agentId: "a" });
+  await use($, "a", "Read");
   list = list.map((x) => ({ ...x, status: "completed" }));
   await clock.advance(10_000);
   expect(await agentsCard($)).toContain("Last batch: 2 agents in 20 s\n  3 tool calls");
   // Five minutes later, a is resumed under its id beside a new agent c.
   await clock.advance(300_000);
   list = [{ ...list[0], status: "running" }, list[1], { id: "c", description: "Fix the test", type: "general-purpose", status: "running" }];
-  await ($ as any).tool.call({ tool: "Edit", file_path: "/x/a.ts", agentId: "a" });
+  await use($, "a", "Edit");
   await clock.advance(10_000);
-  await ($ as any).tool.call({ tool: "Edit", file_path: "/x/c.ts", agentId: "c" });
+  await use($, "c", "Edit");
   await clock.advance(20_000);
-  await ($ as any).tool.call({ tool: "Bash", command: "npm test", agentId: "a" });
+  await use($, "a", "Bash");
   list = list.map((x) => ({ ...x, status: "completed" }));
   await clock.advance(10_000);
   // Only the new runs: a from its resume, c; not a's first run five minutes earlier.
@@ -1093,11 +1071,11 @@ test("agents: a teammate idle at start and woken later counts from its wake", as
   await $.session.start({ source: "startup", cwd: "/tmp" } as any);
   await clock.advance(30 * 60_000);
   list = [{ ...list[0], status: "running" }, { id: "n1", description: "New task", type: "general-purpose", status: "running" }];
-  await ($ as any).tool.call({ tool: "Read", file_path: "/x/pr.diff", agentId: "t1" });
+  await use($, "t1", "Read");
   await clock.advance(10_000);
-  await ($ as any).tool.call({ tool: "Grep", pattern: "TODO", agentId: "n1" });
+  await use($, "n1", "Grep");
   await clock.advance(10_000);
-  await ($ as any).tool.call({ tool: "Write", file_path: "/x/review.md", agentId: "t1" });
+  await use($, "t1", "Write");
   list = [{ ...list[0], status: "idle" }, { ...list[1], status: "completed" }];
   await clock.advance(10_000);
   expect(await agentsCard($)).toContain("Last batch: 2 agents in 20 s\n  3 tool calls");
@@ -1110,16 +1088,16 @@ test("agents: an agent stuck open with no trace for 10 minutes no longer hides l
   await $.session.start({ source: "startup", cwd: "/tmp" } as any);
   await clock.advance(11 * 60_000);
   await spawn($, "p", "q");
-  await ($ as any).tool.call({ tool: "Read", file_path: "/x/p.md", agentId: "p" });
-  await ($ as any).tool.call({ tool: "Read", file_path: "/x/q.md", agentId: "q" });
+  await use($, "p", "Read");
+  await use($, "q", "Read");
   await clock.advance(30_000);
-  await ($ as any).tool.call({ tool: "Write", file_path: "/x/p.md", agentId: "p" });
+  await use($, "p", "Write");
   await clock.advance(70_000);
   expect(await agentsCard($)).toContain("Last batch: 2 agents in 30 s\n  3 tool calls");
 });
 
 test("agents: the receipt's cost, and none when an agent has no price", async ($, on) => {
-  const clock = crew(on);
+  const clock = crew(on, {}, false);
   on("agent.list", () => ({ value: [] }));
   // 98k tokens a request, under Haiku 5.5's 100k threshold: $0.01165 each.
   const work = { input_tokens: 2_000, cache_read_input_tokens: 70_000, cache_creation_input_tokens: 6_000, output_tokens: 20_000 };
@@ -1138,7 +1116,7 @@ test("agents: the receipt's cost, and none when an agent has no price", async ($
   await agentStep($, "w3", "claude-unknown-9");
   await agentStep($, "w4");
   await clock.advance(20_000);
-  await ($ as any).tool.call({ tool: "Read", file_path: "/x/w3.md", agentId: "w3" });
+  await use($, "w3", "Read");
   await clock.advance(70_000);
   const card = await agentsCard($);
   expect(card).toContain("Last batch: 2 agents in 20 s\n  1 tool call");
@@ -1150,14 +1128,14 @@ test("agents: a subagent inside its parent's time does not count as running side
   on("agent.list", () => ({ value: [] }));
   await $.session.start({ source: "startup", cwd: "/tmp" } as any);
   await spawn($, "p");
-  await ($ as any).tool.call({ tool: "Agent", description: "child", agentId: "p" });
+  await use($, "p", "Agent");
   await clock.advance(10_000);
   await spawnUnder($, "p", "c");
-  await ($ as any).tool.call({ tool: "Read", file_path: "/x/c.md", agentId: "c" });
+  await use($, "c", "Read");
   await clock.advance(30_000);
-  await ($ as any).tool.call({ tool: "Read", file_path: "/x/c2.md", agentId: "c" });
+  await use($, "c", "Read");
   await clock.advance(20_000);
-  await ($ as any).tool.call({ tool: "Write", file_path: "/x/p.md", agentId: "p" });
+  await use($, "p", "Write");
   await clock.advance(70_000);
   const card = await agentsCard($);
   expect(card).toContain("Last batch: 2 agents in 1 min\n  4 tool calls");
@@ -1276,58 +1254,50 @@ test("7-day estimate: readings are kept, at most one per half hour", async ($, o
   expect(week.map((s) => s.used)).toEqual([60, 62]);
 });
 
-// Idle compaction: Claude Code's own files say whether Anthropic enabled it and from what size.
-function idleFiles(on: any, flag: unknown, settings: unknown = {}) {
-  on("fs.read", (_$: any, e: any) => {
-    if (e.path === "/h/.claude.json") return { value: JSON.stringify({ cachedGrowthBookFeatures: { tengu_sunny_locket: flag } }) };
-    if (e.path === "/h/.claude/settings.json") return { value: JSON.stringify(settings) };
-    throw new Error("ENOENT " + e.path);
-  });
-}
+// ---------- Fixes from issues #5 to #7 ----------
 
-async function idleTip($: any, on: any, flag: unknown, settings: unknown = {}, lang = "fr_FR.UTF-8") {
-  const clock = world(on, { LANG: lang, HOME: "/h" });
-  idleFiles(on, flag, settings);
-  withUsage(on, LIMITS, BIG);
-  engineStep(on, [BIG_HIT, BIG_HIT]);
+test("narrow terminal: no run-out warning either (#5)", async ($, on) => {
+  world(on);
+  withUsage(on, weekOf(70, 3));
   await $.session.start({ source: "startup", cwd: "/tmp" } as any);
-  await step($, BIG_HIT);
-  // A hit 6 minutes later proves the 1-hour lifetime.
-  await clock.advance(6 * 60_000);
-  await step($, BIG_HIT);
-  return (await boltTip((await band($, "desktop")).ui)) as string;
-}
-
-test("idle compaction: not yet enabled by Anthropic", async ($, on) => {
-  const tip = await idleTip($, on, { mode: "off" });
-  expect(tip.split("\n").pop()).toBe("Compaction à l'arrêt : pas encore ouverte à ton compte par Anthropic.");
+  expect(runOutText((await band($, "terminal", 60)).texts)).toBeUndefined();
+  expect(runOutText((await band($, "terminal")).texts)).toBeDefined();
 });
 
-test("idle compaction: enabled, when it fires", async ($, on) => {
-  const tip = await idleTip($, on, { mode: "compact" });
-  // 289k, above 200k: 54 minutes (90% of the hour) after the last request.
-  expect(tip.split("\n").pop()).toBe(`Compaction à l'arrêt vers ${at(NOW + 6 * 60_000 + 0.9 * 3_600_000)}, dans 54 min, si aucun message n'arrive avant.`);
-});
-
-test("idle compaction: below its threshold, and turned off in settings", async ($, on) => {
-  expect((await idleTip($, on, { mode: "compact", minTokens: 300000 })).split("\n").pop()).toBe("Compaction à l'arrêt : dès 300k ; ce fil est à 289k.");
-});
-
-test("idle compaction: turned off in settings, English", async ($, on) => {
-  const tip = await idleTip($, on, { mode: "compact" }, { idleCompaction: false }, "en_US.UTF-8");
-  expect(tip.split("\n").pop()).toBe("Idle compaction: turned off in settings (idleCompaction).");
-});
-
-test("idle compaction: unreadable files say nothing", async ($, on) => {
-  const clock = world(on, { LANG: "fr_FR.UTF-8", HOME: "/h" });
-  on("fs.read", () => {
-    throw new Error("ENOENT");
+test("last prompt: no 5-hour share across a reset, even when the new reading is higher (#6)", async ($, on) => {
+  world(on, { LANG: "fr_FR.UTF-8" });
+  on("turn.complete", () => ({ text: "" }));
+  const steps = [
+    { usd: 4.0, five: 2, reset: NOW + 60_000 },
+    { usd: 5.07, five: 3, reset: NOW + 5 * 3_600_000 },
+  ];
+  let call = 0;
+  on("session.usage", () => {
+    const s = steps[Math.min(call++, steps.length - 1)];
+    return { value: { startedAt: NOW, context: { tokens: 107_000 + call * 1_000, window: 1_000_000, percent: 11 }, rateLimits: [{ ...LIMITS[1], percentUsed: s.five, resetsAt: new Date(s.reset).toISOString() }, LIMITS[0]], cost: { usd: s.usd } } };
   });
-  withUsage(on, LIMITS, BIG);
-  engineStep(on, [BIG_HIT, BIG_HIT]);
   await $.session.start({ source: "startup", cwd: "/tmp" } as any);
-  await step($, BIG_HIT);
-  await clock.advance(6 * 60_000);
-  await step($, BIG_HIT);
-  expect(await boltTip((await band($, "desktop")).ui)).not.toContain("arrêt");
+  await ($ as any).turn.complete({ answer: "ok" } as any);
+  const { texts } = await band($, "terminal");
+  expect(texts).toContain("(+1,07 $)");
+  expect(texts.some((t: string) => t.includes("% 5h"))).toBe(false);
+});
+
+test("agents: an agent with an unpriced request keeps its known cost out of the main thread (#7)", async ($, on) => {
+  world(on);
+  on("session.usage", () => ({ value: { startedAt: NOW, context: { tokens: 107_000, window: 1_000_000, percent: 11 }, rateLimits: LIMITS, cost: { usd: 10 } } }));
+  on("agent.list", () => ({ value: [{ id: "h1", description: "List the files", type: "Explore", status: "completed" }] }));
+  on("turn.complete", () => ({ text: "" }));
+  const work = { input_tokens: 2_000, cache_read_input_tokens: 70_000, cache_creation_input_tokens: 6_000, output_tokens: 20_000 };
+  engineStep(on, [HIT, { ...work, model: "claude-haiku-5-5" }, { ...work, model: "claude-unknown-9" }]);
+  await $.session.start({ source: "startup", cwd: "/tmp" } as any);
+  await step($, HIT);
+  for (const model of ["claude-haiku-5-5", "claude-unknown-9"]) {
+    const stream = ($ as any).turn.step({ turnId: "t", index: 0, model, effort: "medium", agentId: "h1", messageCount: 2 });
+    for await (const _ of stream) {
+    }
+  }
+  await ($ as any).turn.complete({ answer: "ok", agentId: "h1" } as any);
+  const known = (2_000 * PRICE["claude-haiku-5-5"].input + 70_000 * PRICE["claude-haiku-5-5"].read + 6_000 * 1.25 * PRICE["claude-haiku-5-5"].input + 20_000 * 5 * PRICE["claude-haiku-5-5"].input) / 1e6;
+  expect(await agentsCard($)).toContain(`Opus 5.5 · main thread: ≈ ${en$(10 - known)}`);
 });
