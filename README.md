@@ -28,14 +28,111 @@ Stop hitting your Claude limit by surprise. One band above the prompt shows how 
 
 ### What each pill says
 
-- **Context**: tokens in the context, with a weather icon from Clear to "Compact soon" (hover the pill for the weather and the share of the window). Then one bar per prompt for the last 5, as tall as the tokens it added, the current one in color, and the last prompt's change.
-- **5h / 7d**: the share of your account's limits already used. The gap with the time elapsed is hatched: grey after the bar while you have margin, in the bar's color when you use faster than time passes. Green while usage does not run ahead of time; yellow beyond; red when more than 15 points ahead or past 90%. Then the time left; for the 5-hour limit, the reset time (machine's time zone) sits in the pill's hover card in the app and is left out in the terminal. A window that already reset is hidden until the next reading; the latest reading is shared across the sessions open on the machine.
-- **Run-out warning**: when the week's pace would use up the 7-day limit before it resets, the 7d pill adds when: "⚠ out Sun night" (amber, red within a day). The pace is the share used since the week started over the time elapsed, the same projection as Claude's usage page; hours after midnight belong to the night before ("nuit de dim. à lun." in French). In the app, hover the 7d pill for the time ("At this week's pace (+62% in 3d23h), the 7-day limit runs out Sun night around 00:42, before the reset on Mon 19/10.") and the last day's pace beside it, which tells whether you are speeding up or slowing down. Shown from the week's second day and 15% used; hidden when the terminal line is too narrow for details.
-- **Cache**: the time before the prompt cache lapses, behind a bolt in the app and the word "cache" in the terminal. When the last message read less than 90% of its prompt from the cache, that share comes first ("cache 64% · 52 min"). Each message restarts the clock: 1 hour on a Claude subscription, 5 minutes on an API key. Mods get the token counts but not the lifetime, so it follows Claude Code's rules and corrects itself from what the traffic shows. Yellow under 10 minutes, with what is at stake in dollars ("$2.32 at stake": the whole context written again if the cache lapses); "missed" with its cause (model changed, lapsed, start changed) when a message had to write the cache again, and what that cost above a message served by the cache ("+$2.10"); red "expired" once it lapsed, with what the next message writes again and its cost ("741k to rewrite ≈ $5.93"). From 100k tokens comes the way out: `/compact` up to 300k, a new thread beyond, since the next message would rewrite the whole context at full price, which a new thread avoids and a compaction would only read again. The terminal keeps that advice on the line ("· /compact", "· new thread"); the app puts it in the pill's hover card. In the app, hover the cache pill for the expiry time, the share of the last message read from the cache, what the context costs a message read from the cache against writing it again, and what the cache saved in this thread. The dollars come from Anthropic's list prices, dated 2026-10-08 (input, cache read, and cache writes at 1.25× input for 5 minutes or 2× for 1 hour); on a subscription they are API-price equivalents, hence the "≈". A model missing from the price table shows tokens only. A compaction updates the band at once, without waiting for the next prompt: the context drops to its new size, and the cache reads "compacted" until the next message writes a new one, which is not counted as a miss.
-- **Cost**: what the session cost, as `/cost` totals it (cents dropped from $100), and what the last prompt added (its subagents included), in dollars and in points of the 5-hour limit ("+$1.07 · +2.5% 5h"; the limit is the account's, so other sessions running at the same time count in it). The terminal writes both on the line; the app keeps the total in the pill and the last prompt in its hover card. On a subscription the dollars are the API-price equivalent, not a bill, hence the "≈".
-- **Agents**: how many subagents the thread ran ("2 running · 7" while some run). In the app the pill stays, and its hover card splits the cost: the main thread's share, then each model's agents with their cost, their effort levels and their tokens, the agents still running with the name of each one's latest tool (never its arguments), the last batch of agents (how long it took, how much ran in parallel, its tool calls and cost), and what delegating saved against the main thread's model ("Delegating: ≈ $8.40 saved compared with Opus 5.5"). Each subagent request is counted as it comes back, at list prices (output at 5× input, 5-minute cache writes assumed, Haiku 5.5 by prompt size); the main thread's share is the session cost less its agents'. The terminal shows the count once the thread has run one. Background shell commands are not counted (Claude Code does not expose them to mods). The mod reads all this from the agents' responses: it never hooks a tool call, so it can neither slow one down nor stand in its way.
+| Pill | What it shows | Warns you when |
+| --- | --- | --- |
+| **Context** | Tokens in the context, the last 5 prompts as bars | The weather turns from Clear to "Compact soon" |
+| **5h / 7d** | Share of each limit used, time left | Yellow when you run ahead of the clock, red when far ahead or past 90% |
+| **Run-out** | When this week's pace would hit the 7-day limit | Amber "⚠ out Sun night", red within a day |
+| **Cache** | Minutes before the prompt cache lapses | Yellow under 10 min, red once expired, with what it will cost |
+| **Cost** | What the session cost, and the last prompt | Never: it just counts |
+| **Agents** | Subagents running and run so far | Never: it just counts |
 
-In the desktop app each block is a tinted pill with its icon, and a pill never shrinks to fit. In the app, each pill shows its details in a card above the band while the pointer is over it. In the terminal the same blocks sit on one line, split by a thin rule:
+In the app, **hover any pill** for its details.
+
+#### Context
+
+- A weather icon from Clear to "Compact soon", then the tokens in the context.
+- One bar per prompt for the last 5, as tall as the tokens it added; the current one in color.
+- The last prompt's change ("▲ +6.3k").
+- Hover: the weather and the share of the window.
+
+#### 5h / 7d
+
+- The share of your account's limits already used, then the time left.
+- The hatched part is the gap with the time elapsed: grey after the bar while you have margin, in the bar's color when you use faster than time passes.
+
+![Gauge colors and hatching](docs/gauges-hatching.png)
+
+<details>
+<summary>More detail</summary>
+
+- Green while usage does not run ahead of time, yellow beyond, red when more than 15 points ahead or past 90%.
+- The 5-hour reset time (machine's time zone) is in the pill's hover card in the app, left out in the terminal.
+- A window that already reset is hidden until the next reading.
+- The latest reading is shared across the sessions open on the machine.
+
+</details>
+
+#### Run-out warning
+
+- Appears on the 7d pill when the week's pace would use up the limit **before** it resets: "⚠ out Sun night".
+- Amber, red within a day.
+- Hover: the exact time and the last day's pace, to tell whether you are speeding up or slowing down.
+  > At this week's pace (+62% in 3d23h), the 7-day limit runs out Sun night around 00:42, before the reset on Mon 19/10.
+
+<details>
+<summary>More detail</summary>
+
+- The pace is the share used since the week started over the time elapsed: the same projection as Claude's usage page.
+- Hours after midnight belong to the night before ("nuit de dim. à lun." in French).
+- Shown from the week's second day and 15% used; hidden when the terminal line is too narrow for details.
+
+</details>
+
+#### Cache
+
+- The time before the prompt cache lapses: behind a bolt in the app, the word "cache" in the terminal.
+- Each message restarts the clock: 1 hour on a Claude subscription, 5 minutes on an API key.
+- **Under 10 minutes** (yellow): what is at stake ("$2.32 at stake"), the whole context written again if it lapses.
+- **Expired** (red): what the next message writes again and its cost ("741k to rewrite ≈ $5.93").
+- **Missed**: a message had to write the cache again; shows the cause (model changed, lapsed, start changed) and the extra cost ("+$2.10").
+- **The way out**, from 100k tokens: `/compact` up to 300k, a new thread beyond.
+
+<details>
+<summary>More detail</summary>
+
+- When the last message read less than 90% of its prompt from the cache, that share comes first ("cache 64% · 52 min").
+- Mods get the token counts but not the lifetime, so the mod follows Claude Code's rules and corrects itself from what the traffic shows.
+- Why a new thread beyond 300k: the next message would rewrite the whole context at full price, which a new thread avoids and a compaction would only read again. The terminal keeps the advice on the line ("· /compact", "· new thread"); the app puts it in the hover card.
+- Hover: the expiry time, the share of the last message read from the cache, what the context costs read from the cache against written again, and what the cache saved in this thread.
+- Prices: Anthropic's list prices dated 2026-10-08 (input, cache read, cache writes at 1.25× input for 5 minutes or 2× for 1 hour). On a subscription they are API-price equivalents, hence the "≈". A model missing from the price table shows tokens only.
+- A compaction updates the band at once: the context drops to its new size, and the cache reads "compacted" until the next message writes a new one (not counted as a miss).
+
+</details>
+
+#### Cost
+
+- What the session cost, as `/cost` totals it (cents dropped from $100).
+- What the last prompt added, subagents included, in dollars and in points of the 5-hour limit ("+$1.07 · +2.5% 5h").
+- The app keeps the total in the pill and the last prompt in its hover card; the terminal writes both on the line.
+
+<details>
+<summary>More detail</summary>
+
+- The 5-hour limit is the account's: other sessions running at the same time count in it.
+- On a subscription the dollars are the API-price equivalent, not a bill, hence the "≈".
+
+</details>
+
+#### Agents
+
+- How many subagents the thread ran ("2 running · 7" while some run).
+- Hover: the cost split between the main thread and each model's agents, the agents still running with their latest tool, the last batch, and what delegating saved ("Delegating: ≈ $8.40 saved compared with Opus 5.5").
+
+<details>
+<summary>More detail</summary>
+
+- For each model's agents: their cost, effort levels and tokens. Running agents show the name of their latest tool, never its arguments. The last batch: how long it took, how much ran in parallel, its tool calls and cost.
+- Each subagent request is counted as it comes back, at list prices (output at 5× input, 5-minute cache writes assumed, Haiku 5.5 by prompt size); the main thread's share is the session cost less its agents'.
+- The terminal shows the count once the thread has run one.
+- Background shell commands are not counted (Claude Code does not expose them to mods).
+- The mod reads all this from the agents' responses: it never hooks a tool call, so it can neither slow one down nor stand in its way.
+
+</details>
+
+#### App and terminal
+
+In the desktop app each block is a tinted pill with its icon. A pill never shrinks; when the window is too narrow, the pills wrap onto a second line. In the terminal the same blocks sit on one line, split by a thin rule:
 
 ```
 ☂ 634k ▃▄▂█▆ ▲ +6.3k │ 5h ━━━━╍─ 74% · 24 min │ 7d ━━━━── 65% · 2d20h │ cache 52 min │ ≈ $41.07 (+$0.58 · +1.5% 5h) │ 2 agents
