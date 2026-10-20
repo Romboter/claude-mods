@@ -994,13 +994,18 @@ function recordRequest(at, usage, model) {
   cache = cur;
 }
 
-// List prices of a model id, for a prompt of that many tokens: lowercase, without a "[1m]"-style
-// suffix, a trailing date or a provider prefix ("anthropic.", "us.anthropic.", ".../"); null when
-// the table lacks it.
-function priceOf(model, tokens = 0) {
+// A model id as the price table names it: lowercase, without a "[1m]"-style suffix, a Vertex
+// "@date", a Bedrock "-v1:0", a trailing date or a provider prefix ("anthropic.", "us.anthropic.",
+// ".../"). "us.anthropic.claude-sonnet-5-5-20260101-v1:0" → "claude-sonnet-5-5".
+export function modelId(model) {
   let id = String(model ?? "").trim().toLowerCase();
-  id = id.replace(/\[[^\]]*\]$/, "").replace(/-20\d{6}$/, "");
-  id = id.slice(Math.max(id.lastIndexOf("."), id.lastIndexOf("/")) + 1);
+  id = id.replace(/\[[^\]]*\]$/, "").replace(/@[^@/]*$/, "").replace(/-v\d+(?::\d+)?$/, "").replace(/-20\d{6}$/, "");
+  return id.slice(Math.max(id.lastIndexOf("."), id.lastIndexOf("/")) + 1);
+}
+
+// List prices of a model id, for a prompt of that many tokens; null when the table lacks it.
+function priceOf(model, tokens = 0) {
+  const id = modelId(model);
   if (!Object.prototype.hasOwnProperty.call(PRICES, id)) return null;
   const price = PRICES[id];
   return price.over && tokens > price.over.at ? price.over : price;
@@ -1154,9 +1159,7 @@ function nameTeam() {
 
 // "claude-haiku-5-5" → "Haiku 5.5"; an id it cannot read stays as it is.
 function modelName(model) {
-  let id = String(model ?? "").trim().toLowerCase().replace(/\[[^\]]*\]$/, "").replace(/-20\d{6}$/, "");
-  id = id.slice(Math.max(id.lastIndexOf("."), id.lastIndexOf("/")) + 1);
-  const m = /^claude-([a-z]+)-(\d+(?:-\d+)*)$/.exec(id);
+  const m = /^claude-([a-z]+)-(\d+(?:-\d+)*)$/.exec(modelId(model));
   return m ? `${m[1][0].toUpperCase()}${m[1].slice(1)} ${m[2].replace(/-/g, ".")}` : String(model ?? "");
 }
 

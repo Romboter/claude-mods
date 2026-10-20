@@ -4,6 +4,8 @@
 
 ## token-weather-usage
 
+[![Listed on statuslin.es](https://img.shields.io/badge/listed%20on-statuslin.es-c96442)](https://statuslin.es/mods/token-weather-usage)
+
 Stop hitting your Claude limit by surprise. One band above the prompt shows how big your context is, your 5-hour and weekly limits against the clock (with a warning when the week's pace would run out before the reset), whether the prompt cache is still warm, what the session and the last prompt cost, and which agents are running.
 
 ![One session, step by step](docs/band-story.gif)

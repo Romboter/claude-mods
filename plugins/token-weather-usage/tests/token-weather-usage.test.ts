@@ -1,6 +1,6 @@
 import { test, expect, mock } from "claude-code/testing";
 // @ts-ignore: the module is plain JavaScript.
-import { toolText, batchesOf } from "../hooks/token-weather-usage.mjs";
+import { toolText, batchesOf, modelId } from "../hooks/token-weather-usage.mjs";
 
 // October 2, 2026, 13:00 UTC.
 const NOW = Date.UTC(2026, 9, 2, 13, 0);
@@ -912,6 +912,19 @@ async function agentStep($: any, agentId: string, model = "claude-haiku-5-5") {
 }
 
 const agentsCard = async ($: any) => String(await cardOf((await band($, "desktop")).ui, "agents"));
+
+test("prices: Bedrock and Vertex ids find the same model as the API's (#9)", () => {
+  for (const id of [
+    "claude-sonnet-5-5",
+    "claude-sonnet-5-5-20260101",
+    "claude-sonnet-5-5[1m]",
+    "anthropic.claude-sonnet-5-5-20260101-v1:0",
+    "us.anthropic.claude-sonnet-5-5-20260101-v1:0",
+    "eu.anthropic.claude-sonnet-5-5-v2",
+    "claude-sonnet-5-5@20260101",
+    "publishers/anthropic/models/claude-sonnet-5-5@20260101",
+  ]) expect(modelId(id)).toBe("claude-sonnet-5-5");
+});
 
 test("agents: a tool's name in Claude Code's words, never its arguments", () => {
   expect(toolText("Bash")).toBe("Bash");
