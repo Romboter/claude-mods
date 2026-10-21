@@ -521,6 +521,8 @@ const ICONS = {
   agents: (c) =>
     `<rect x="4" y="7.5" width="16" height="12.5" rx="3.5" fill="${c}" fill-opacity="0.14" stroke="${c}" stroke-width="2"/><path d="M12 7.5V4M2 12.5v3M22 12.5v3" fill="none" stroke="${c}" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="3.2" r="1.3" fill="${c}"/><circle cx="9" cy="13" r="1.5" fill="${c}"/><circle cx="15" cy="13" r="1.5" fill="${c}"/><path d="M9.5 16.8h5" fill="none" stroke="${c}" stroke-width="1.8" stroke-linecap="round"/>`,
 };
+// The tint behind each pill in the app; the "background" option set to off leaves only the colored outline.
+let pillFill = true;
 // Icon color per block: deeper than the pill's tint, readable on light and dark backgrounds.
 const ICON_COLORS = { five_hour: "#3a9a62", seven_day: "#8a5fd0", spend_limit: "#b8892a", calm: "#1b9cbe", fast: "#d9962b", alert: "#d64545", cost: "#b8892a", agents: "#c4507f" };
 const LIMIT_ICONS = { five_hour: "gauge", seven_day: "calendar", spend_limit: "coin" };
@@ -531,6 +533,7 @@ const RESERVED_COLUMNS = 2;
 // because an event cannot be registered twice.
 export function register(on, options) {
   const language = options?.language;
+  pillFill = options?.background !== "off";
 
   on("session.start", async ($, e, next) => {
     ticker?.cancel();
@@ -1576,7 +1579,7 @@ function drawLine(elements, surface, columns, now) {
         paddingY: 0,
         borderStyle: "round",
         borderColor: b.tint[1],
-        backgroundColor: b.tint[0],
+        ...(pillFill ? { backgroundColor: b.tint[0] } : {}),
       }),
     );
     // A narrow window wraps the pills onto a second line instead of clipping the last ones (#2).

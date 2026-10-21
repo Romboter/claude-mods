@@ -25,6 +25,12 @@
       "title": "Language",
       "description": "Labels in English (en), French (fr) or Russian (ru), or auto: follows LC_ALL, LC_MESSAGES or LANG, and falls back to English.",
       "default": "auto"
+    },
+    "background": {
+      "type": "string",
+      "title": "Pill background",
+      "description": "on: each pill in the desktop app has a tinted fill; off: only the colored outline.",
+      "default": "on"
     }
   },
   "types": "./types/index.d.ts"
