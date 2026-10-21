@@ -16,7 +16,7 @@
 // The engine reads on(...) and $.noun.method(...) from the source: they stay spelled out,
 // and the functions that take $ live at the top level.
 
-import { warmCompact, warmComplete, warmEnd, warmMenu, warmMeasure, warmStart, warmStepStart } from "./cache-warm";
+import { warmCompact, warmComplete, warmEnd, warmMeasure, warmStart, warmStepStart } from "./cache-warm";
 
 // ---------- Language ----------
 
@@ -730,7 +730,7 @@ export function register(on, options) {
     const elements = $.ui.resolve(e);
     const now = await $.clock.now();
     warm = await readWarm($);
-    const line = drawLine(elements, e.surface, props.bodyColumns ?? 80, now, () => void warmMenu($));
+    const line = drawLine(elements, e.surface, props.bodyColumns ?? 80, now);
     // Mods placed after us draw below our line; an empty drawing adds no blank line.
     const below = await next(e);
     return isBlank(below) ? line : elements.Box({ flexDirection: "column", children: [line, below] });
@@ -1427,7 +1427,7 @@ function gaugeBlock({ Box, Text, Svg }, mode, g) {
   return { key: "gauge-" + g.label, tint: TINTS[g.kind] ?? TINTS.spend_limit, parts, tip };
 }
 
-function cacheBlock({ Text, Svg, Button }, mode, state, onMenu) {
+function cacheBlock({ Text, Svg }, mode, state) {
   const parts = [];
   if (mode === "svg") {
     const color = warm ? WARM_COLORS[warm.state] : (ICON_COLORS[state.tone] ?? ICON_COLORS.calm);
@@ -1450,8 +1450,6 @@ function cacheBlock({ Text, Svg, Button }, mode, state, onMenu) {
     if (lead) parts.push(Text({ key: "d", bold: true, color: TONES.fast.text, children: mode === "svg" ? lead : `· ${lead}` }));
     if (rest) parts.push(Text({ key: "e", dimColor: true, children: mode === "svg" && !lead ? rest : `· ${rest}` }));
   }
-  // The options dialog for cache warming; the pill itself cannot be pressed.
-  if (Button && onMenu && mode !== "none") parts.push(Button({ key: "cache-menu", plain: true, dimColor: true, label: "▾", onPress: onMenu }));
   const tint = TINTS[state.tone] ?? TINTS.calm;
   // Hover the pill for the expiry time, the share read, the costs and the advice.
   const tip = [state.tip ?? "", ...(warm ? warm.lines : [])].filter(Boolean).join("\n");
@@ -1503,7 +1501,7 @@ function svgGauge(g) {
 
 // ---------- Line ----------
 
-function drawLine(elements, surface, columns, now, onMenu) {
+function drawLine(elements, surface, columns, now) {
   const { Box, Text, Svg } = elements;
   const desktop = surface === "desktop" && !!Svg;
   // A window that already reset has no valid reading: hidden until the next one.
@@ -1536,7 +1534,7 @@ function drawLine(elements, surface, columns, now, onMenu) {
     blocks.push({ key: "context", tint: TINTS.context, parts, tip: title });
   }
   for (const g of gauges) blocks.push(gaugeBlock(elements, mode, g));
-  if (cacheNow) blocks.push(cacheBlock(elements, mode, cacheNow, onMenu));
+  if (cacheNow) blocks.push(cacheBlock(elements, mode, cacheNow));
   // The cost goes first when the terminal is short of room.
   if (cost !== null && cost >= 0.005 && mode !== "none") {
     const parts = [Text({ key: "v", bold: true, children: T.cost(cost) })];
@@ -1605,7 +1603,7 @@ function textWidth(gauges, cacheNow) {
   for (const g of gauges) width += g.label.length + 1 + TEXT_CELLS + 1 + g.value.length + (g.when ? 3 + g.when.length : 0) + (g.out ? 3 + T.runOut(dayPartOf(g.out.at)).length : 0);
   blocks += gauges.length;
   if (cacheNow) {
-    width += cacheText(cacheNow).length + 2;
+    width += cacheText(cacheNow).length;
     blocks++;
   }
   if (cost !== null && cost >= 0.005) {

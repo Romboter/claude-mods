@@ -691,32 +691,6 @@ export async function warmEnd($: EngineInterface, e: { reason?: string }): Promi
   else if (c.session) await $.store.delete(`warm:${c.session}`).catch(() => undefined)
 }
 
-async function caffeineCommand($: EngineInterface, raw: string): Promise<{ text: string }> {
-
-}
-
-// The ▾ button in the cache pill: a dialog of the likeliest next moves; typing in "Other" runs
-// any /caffeine argument ("warm 2h", "until 18:00", "wake 30 min").
-export async function warmMenu($: EngineInterface): Promise<void> {
-  const options = c.isOn ? ['Turn off', 'Poke now', 'Warm for 1 hour', 'Show status'] : ['Turn on', 'Warm for 1 hour', 'Show cost', 'Show status']
-  let answer: string
-  try {
-    answer = await $.ui.ask(`Cache warming is ${c.isOn ? 'on' : 'off'}. Pick one, or type a /caffeine argument.`, { header: 'caffeine', options })
-  } catch {
-    return
-  }
-  const args: Record<string, string> = {
-    'Turn on': 'on',
-    'Turn off': 'off',
-    'Poke now': 'poke',
-    'Warm for 1 hour': 'warm 1h',
-    'Show status': 'status',
-    'Show cost': 'cost',
-  }
-  const result = await caffeineCommand($, args[answer] ?? answer)
-  tell($, result.text)
-}
-
 // Registers the events token-weather-usage.mjs does not hook; it calls the warm* functions for the rest.
 export function warming(on: Parameters<Register>[0]): void {
   on('classic.StopFailure', async ($, e, next) => {
@@ -758,5 +732,122 @@ export function warming(on: Parameters<Register>[0]): void {
 
   // A compaction or /clear empties the cache: no pokes until the person's next
   // request (or the turn carrying on) writes it again.
-  on('command.run', { command: 'caffeine' }, async ($, e) => caffeineCommand($, e.args))
+  on('command.run', { command: 'caffeine' }, async ($, e) => {
+    const args = e.args.trim()
+    const [word = '', ...rest] = args.split(/\s+/)
+    const arg = word.toLowerCase()
+    const value = rest.join(' ').trim()
+    const now = await $.clock.now()
+    switch (arg) {
+      case 'help':
+        return { text: help }
+      case '':
+        if (c.isOn) c.isAutoDeclined = true
+        await switchOn($, c, !c.isOn)
+        return { text: c.isOn ? `Caffeine on: ${describe(c, now).replace(/^caffeine on · /, '')}.` : 'Caffeine off.' }
+      case 'on':
+        await switchOn($, c, true)
+        return { text: `Caffeine on until you turn it off, poking ${span(everyOf(c))} after the last request (${ttlLabel(ttlOf(c))} cache).` }
+      case 'off':
+        c.isAutoDeclined = true
+        await switchOn($, c, false)
+        return { text: 'Caffeine off.' }
+      case 'for':
+      case 'warm': {
+        const ms = value ? parseDuration(value) : WARM
+        if (ms === null) return { text: `Not a duration I know: ${value}. Try 2h, 90m or 1h30m.` }
+        await switchOn($, c, true, now + ms)
+        return { text: `Caffeine on, keeping the cache warm until ${clock(now + ms, now)}.` }
+      }
+      case 'until': {
+        const at = parseClock(value, now)
+        if (at === null) return { text: `Not a time I know: ${value || '(none)'}. Try 18:00 or 6pm.` }
+        await switchOn($, c, true, at)
+        return { text: `Caffeine on, keeping the cache warm until ${clock(at, now)}.` }
+      }
+      case 'poke':
+        if (c.poke !== 'none') return { text: 'A poke is already on its way.' }
+        // a prompt submitted from inside this command would wait on the turn it holds
+        $.clock.after(50, () => void $.clock.now().then(t => poke($, c, t)))
+        return { text: `Poking: ${c.message}` }
+      case 'message':
+      case 'say': {
+        if (!value) return { text: `The poke says: ${c.message}` }
+        const saved = await setMessage($, c, value.toLowerCase() === 'reset' ? '' : value)
+        return { text: `The poke now says: ${saved}` }
+      }
+      case 'auto': {
+        const v = value.toLowerCase()
+        if (!v) return { text: c.autoAt ? `Caffeine turns on by itself past ${sized(c.autoAt)} tokens of context.` : 'Auto is off. /caffeine auto 100k turns it on.' }
+        const n = v === 'off' ? 0 : v === 'on' ? 100_000 : /^(\d+(?:\.\d+)?)(k|m)?$/.test(v) ? Math.round(Number.parseFloat(v) * (v.endsWith('m') ? 1e6 : v.endsWith('k') ? 1e3 : 1)) : null
+        if (n === null || (n > 0 && n < 1000)) return { text: `Not a token count I know: ${value}. Try 100k, or off.` }
+        c.autoAt = n
+        await $.store.set('caffeine.autoAt', n)
+        return { text: n ? `Caffeine turns on by itself once the context passes ${sized(n)} tokens (now ${sized(c.context)}).` : 'Auto off.' }
+      }
+      case 'cost':
+        return { text: costLines(c).join('\n') }
+      case 'every': {
+        if (!value || value === 'auto') {
+          c.every = null
+          await $.store.set('caffeine.every', null)
+          await refresh($, c)
+          return { text: `Poking ${span(everyOf(c))} after the last request (auto, ${ttlLabel(ttlOf(c))} cache).` }
+        }
+        const ms = parseDuration(value)
+        if (ms === null || ms < 30_000) return { text: `Not a duration I know (30s or more): ${value}.` }
+        if (ms >= ttlOf(c)) return { text: `${span(ms)} is past the ${ttlLabel(ttlOf(c))} cache: it would be cold by then.` }
+        c.every = ms
+        await $.store.set('caffeine.every', ms)
+        await refresh($, c)
+        return { text: `Poking ${span(ms)} after the last request.` }
+      }
+      case 'ttl': {
+        const v = value.toLowerCase()
+        const ttl = v === '1h' ? TTL_1H : v === '5m' ? TTL_5M : null
+        if (ttl === null && v && v !== 'auto') return { text: 'The TTL is 1h, 5m or auto.' }
+        c.ttl = ttl
+        await $.store.set('caffeine.ttl', ttl)
+        await refresh($, c)
+        return { text: `Cache TTL ${ttlLabel(ttlOf(c))} (${ttlSource(c)}); poking ${span(everyOf(c))} after the last request.` }
+      }
+      case 'forever':
+        return forever($, c, value.toLowerCase() === 'yes')
+      case 'idle': {
+        const [first = '', second = ''] = value.toLowerCase().split(/\s+/)
+        if (first === 'off' || first === 'never') {
+          return forever($, c, second === 'yes')
+        }
+        const ms = parseDuration(value)
+        if (ms === null) return { text: `Not a duration I know: ${value || '(none)'}. Try 8h, or off for no end this time.` }
+        c.idle = ms
+        await $.store.set('caffeine.idle', ms)
+        return { text: `Caffeine turns itself off after ${span(ms)} without a turn of your own.` }
+      }
+      case 'wake':
+        return wakeCommand($, c, value)
+      case 'status': {
+        const block = blocking(c.limits)
+        const lines = [
+          describe(c, now),
+          `Cache TTL ${ttlLabel(ttlOf(c))} (${ttlSource(c)}) · poke ${span(everyOf(c))} after the last request${c.every === null ? ' (auto)' : ''}`,
+          `${c.isForever ? 'No idle stop this time: on until you turn it off' : `Off by itself after ${span(c.idle)} idle`} · auto ${c.autoAt ? `past ${sized(c.autoAt)}` : 'off'}`,
+          c.lastWarm === null ? '' : `The last poke found the cache ${c.lastWarm ? 'warm' : 'cold'}.`,
+          c.coldAt ? `The cache last went cold before ${clock(c.coldAt, now)}, after ${span(c.coldGap)} idle.` : '',
+          `The poke says: ${c.message}`,
+          c.armed ? `Wake: Claude continues at ${clock(c.armed.at, now)} (in ${span(c.armed.at - now)}), told: ${await wakeText($, c.armed)}.` : 'Wake: none booked.',
+          block ? `${block.label} limit ${block.percent}%, resets ${clock(block.resetsAt, now)}.` : '',
+        ]
+        return { text: lines.filter(Boolean).join('\n') }
+      }
+      default: {
+        // a bare time is a wake: /caffeine 1 min, /caffeine at 3pm
+        if (parseWake(args, now) !== null) {
+          return wakeCommand($, c, args)
+        }
+        return { text: `Not a caffeine command: ${word}\n${help}` }
+      }
+    }
+  })
+
 }
