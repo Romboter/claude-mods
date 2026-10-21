@@ -1,7 +1,7 @@
 // Cache warming for Token Weather Usage: a short poke before the prompt cache expires, and an
 // optional wake after the usage limit resets. Off until /caffeine turns it on, per session.
 // Ported from cache-caffeine by Luis Perez Morales (MIT, https://github.com/lperezmo/cache-caffeine)
-// with its row above the prompt removed: the state shows in the cache pill (see warmLabel) and
+// with its row above the prompt removed: the state shows in the cache pill (see warmState) and
 // everything is driven by /caffeine. brew.ts and wake.ts are unchanged copies.
 
 import { atom, read, update } from 'claude-code'
@@ -202,17 +202,24 @@ function describe(c: Caffeine, now: number): string {
   return `caffeine on · poke at ${clock(at, now)} (in ${span(at - now)})${tail}`
 }
 
-// The short form the cache pill appends: "☕ poke 14:32", "☕ paused", "☕ wake 14:12".
-function warmLabel(c: Caffeine, now: number): string {
-  const wake = c.armed ? `wake ${clock(c.armed.at, now)}` : ''
-  if (!c.isOn) return wake ? `☕ ${wake}` : ''
-  let state: string
-  if (overLine(c.limits)) state = 'paused'
+// What the cache pill shows: the state recolors its bolt, the lines join its hover card.
+// Null while caffeine is off and no wake is booked (the pill keeps its own tone).
+type Warm = { state: 'warm' | 'poking' | 'paused' | 'cold' | 'waiting' | 'wake'; lines: string[] }
+
+function warmState(c: Caffeine, now: number): Warm | null {
+  if (!c.isOn && !c.armed) return null
+  const lines = [describe(c, now).replace(/^caffeine /, 'Caffeine ')]
+  if (c.lastWarm !== null) lines.push(`The last poke found the cache ${c.lastWarm ? 'warm' : 'cold'}.`)
+  if (c.armed) lines.push(`Wake: Claude continues at ${clock(c.armed.at, now)} (in ${span(c.armed.at - now)}).`)
+  let state: Warm['state']
+  if (!c.isOn) state = 'wake'
+  else if (overLine(c.limits)) state = 'paused'
   else if (c.lastAt === 0) state = 'waiting'
-  else if (c.isBusy || c.poke !== 'none') state = 'warm'
+  else if (c.poke !== 'none') state = 'poking'
+  else if (c.isBusy) state = 'warm'
   else if (now - c.lastAt >= ttlOf(c)) state = 'cold'
-  else state = `poke ${clock(nextPokeAt(c.lastAt, everyOf(c))!, now)}`
-  return `☕ ${[state, wake].filter(Boolean).join(' · ')}`
+  else state = 'warm'
+  return { state, lines }
 }
 
 async function costNow($: EngineInterface): Promise<number | null> {
@@ -224,14 +231,14 @@ async function costNow($: EngineInterface): Promise<number | null> {
   }
 }
 
-// Redraws the band and hands the cache pill its label (token-weather-usage.mjs reads it by session).
+// Redraws the band and hands the cache pill its state (token-weather-usage.mjs reads it by session).
 async function refresh($: EngineInterface, c: Caffeine): Promise<void> {
-  const label = warmLabel(c, await $.clock.now())
+  const warm = warmState(c, await $.clock.now())
   try {
-    if (label && c.session) await $.store.set(`warm:${c.session}`, label)
+    if (warm && c.session) await $.store.set(`warm:${c.session}`, warm)
     else if (c.session) await $.store.delete(`warm:${c.session}`)
   } catch {
-    // the pill just shows no label
+    // the pill just keeps its own tone
   }
   $.ui.invalidate('ui.render')
 }

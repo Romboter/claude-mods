@@ -340,9 +340,12 @@ let readings = [];
 const TURNS_PREFIX = "turns:";
 const TURNS_KEEP_MS = 8 * 24 * 3_600_000;
 let turnsKey = null;
-// cache-warm.ts writes the cache-warming label here for this session; the cache pill appends it.
+// cache-warm.ts writes the cache-warming state here for this session: { state, lines }. It recolors the
+// cache pill's bolt and adds its lines to the hover card.
 let warmKey = null;
-let warmLabel = "";
+let warm = null;
+// Bolt color per warming state; off keeps the pill's own tone.
+const WARM_COLORS = { warm: "#3a9a62", poking: "#1b9cbe", paused: "#d9962b", cold: "#d64545", waiting: "#8ea3b8", wake: "#8a5fd0" };
 
 // ---------- Account limits ----------
 
@@ -726,7 +729,7 @@ export function register(on, options) {
     if (props.hasSurvey || (readings.length === 0 && limits.list.length === 0)) return next(e);
     const elements = $.ui.resolve(e);
     const now = await $.clock.now();
-    warmLabel = await readWarm($);
+    warm = await readWarm($);
     const line = drawLine(elements, e.surface, props.bodyColumns ?? 80, now);
     // Mods placed after us draw below our line; an empty drawing adds no blank line.
     const below = await next(e);
@@ -734,14 +737,14 @@ export function register(on, options) {
   });
 }
 
-// The cache-warming label cache-warm.ts keeps for this session ("☕ poke 14:32"), or "".
+// The cache-warming state cache-warm.ts keeps for this session, or null (caffeine off).
 async function readWarm($) {
-  if (!warmKey) return "";
+  if (!warmKey) return null;
   try {
-    const label = await $.store.get(warmKey);
-    return typeof label === "string" ? label : "";
+    const saved = await $.store.get(warmKey);
+    return saved && WARM_COLORS[saved.state] && Array.isArray(saved.lines) ? saved : null;
   } catch {
-    return "";
+    return null;
   }
 }
 
@@ -1381,7 +1384,7 @@ const KNOWN_TOKENS = [
 
 // The cache block as the terminal writes it: "cache 8 min · $2.32 at stake".
 function cacheText(state) {
-  return state ? [`${T.cache} ${state.value}`, state.detail, state.stake, state.advice, warmLabel].filter(Boolean).join(" · ") : "";
+  return state ? [`${T.cache} ${state.value}`, state.detail, state.stake, state.advice].filter(Boolean).join(" · ") : "";
 }
 
 // ---------- Blocks ----------
@@ -1427,27 +1430,30 @@ function gaugeBlock({ Box, Text, Svg }, mode, g) {
 function cacheBlock({ Text, Svg }, mode, state) {
   const parts = [];
   if (mode === "svg") {
-    const color = ICON_COLORS[state.tone] ?? ICON_COLORS.calm;
+    const color = warm ? WARM_COLORS[warm.state] : (ICON_COLORS[state.tone] ?? ICON_COLORS.calm);
     parts.push(icon(Svg, "i", "bolt", color, T.icons.cache));
   }
   // In the app the bolt says "cache"; the terminal keeps the word.
   if (mode !== "svg") parts.push(Text({ key: "l", children: T.cache }));
   // A miss in yellow, an expired cache in red; while the time runs short, the time carries the color.
-  const valueColor =
-    state.tone === "alert" ? TONES.alert.text : state.tone === "fast" && (!state.urgent || !state.detail) ? TONES.fast.text : undefined;
+  // Warming on: the value carries the warming color too, since the terminal has no bolt.
+  const valueColor = warm
+    ? WARM_COLORS[warm.state]
+    : state.tone === "alert" ? TONES.alert.text : state.tone === "fast" && (!state.urgent || !state.detail) ? TONES.fast.text : undefined;
   parts.push(Text(state.tone === "none" ? { key: "v", dimColor: true, children: state.value } : { key: "v", bold: true, ...(valueColor ? { color: valueColor } : {}), children: state.value }));
   // After the value: the urgent detail in yellow, then the rest dim (the stake, and in the
   // terminal the advice the app keeps for the tooltip).
   if (mode !== "none") {
     const lead = state.urgent ? state.detail : "";
-    const rest = [state.urgent ? "" : state.detail, state.stake, mode === "text" ? state.advice : "", warmLabel].filter(Boolean).join(" · ");
+    const rest = [state.urgent ? "" : state.detail, state.stake, mode === "text" ? state.advice : ""].filter(Boolean).join(" · ");
     if (mode === "svg" && (lead || rest)) parts.push(divider(Text, "s"));
     if (lead) parts.push(Text({ key: "d", bold: true, color: TONES.fast.text, children: mode === "svg" ? lead : `· ${lead}` }));
     if (rest) parts.push(Text({ key: "e", dimColor: true, children: mode === "svg" && !lead ? rest : `· ${rest}` }));
   }
   const tint = TINTS[state.tone] ?? TINTS.calm;
   // Hover the pill for the expiry time, the share read, the costs and the advice.
-  return { key: "cache", tint, parts, tip: state.tip ?? "" };
+  const tip = [state.tip ?? "", ...(warm ? warm.lines : [])].filter(Boolean).join("\n");
+  return { key: "cache", tint, parts, tip };
 }
 
 // ---------- Limits: gauges ----------
