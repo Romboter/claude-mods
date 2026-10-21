@@ -46,3 +46,8 @@ under the MIT License:
   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
   SOFTWARE.
+
+Cache warming (plugins/token-weather-usage/hooks/cache-warm.ts, brew.ts, wake.ts) is ported from
+cache-caffeine by Luis Perez Morales (https://github.com/lperezmo/cache-caffeine), MIT License,
+Copyright (c) Luis Perez Morales. brew.ts and wake.ts are unchanged copies; cache-warm.ts drops
+the row above the prompt and shows its state in the cache pill instead.

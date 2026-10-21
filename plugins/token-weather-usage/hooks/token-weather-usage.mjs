@@ -16,6 +16,8 @@
 // The engine reads on(...) and $.noun.method(...) from the source: they stay spelled out,
 // and the functions that take $ live at the top level.
 
+import { warmCompact, warmComplete, warmEnd, warmMeasure, warmStart, warmStepStart } from "./cache-warm";
+
 // ---------- Language ----------
 
 // Labels in English, French or Russian. "auto" follows LC_ALL, LC_MESSAGES or LANG, then the runtime's
@@ -338,6 +340,9 @@ let readings = [];
 const TURNS_PREFIX = "turns:";
 const TURNS_KEEP_MS = 8 * 24 * 3_600_000;
 let turnsKey = null;
+// cache-warm.ts writes the cache-warming label here for this session; the cache pill appends it.
+let warmKey = null;
+let warmLabel = "";
 
 // ---------- Account limits ----------
 
@@ -519,6 +524,8 @@ const LIMIT_ICONS = { five_hour: "gauge", seven_day: "calendar", spend_limit: "c
 // Columns the terminal may cover at the end of the band.
 const RESERVED_COLUMNS = 2;
 
+// Events both this module and cache-warm.ts need are hooked here once and handed on (warm*),
+// because an event cannot be registered twice.
 export function register(on, options) {
   const language = options?.language;
 
@@ -541,7 +548,9 @@ export function register(on, options) {
     lastPrompt5h = null;
     cacheKey = "";
     cacheEnv = await cacheEnvOf($);
-    turnsKey = TURNS_PREFIX + (await $.session.id());
+    const sessionId = await $.session.id();
+    turnsKey = TURNS_PREFIX + sessionId;
+    warmKey = "warm:" + sessionId;
     await restoreTurns($);
     const usage = await $.session.usage();
     pushReading(usage.context);
@@ -573,11 +582,13 @@ export function register(on, options) {
         $.ui.invalidate("ui.render");
       }
     });
+    await warmStart($, e);
     $.ui.invalidate("ui.render");
     return next(e);
   });
 
   on("session.end", async ($, e, next) => {
+    await warmEnd($, e);
     // A real end (exit, or process stopped); /clear, /resume and disconnect keep the tickers.
     if (e.reason === "prompt_input_exit" || e.reason === "other") {
       ticker?.cancel();
@@ -626,7 +637,9 @@ export function register(on, options) {
       return result;
     }
     const at = await $.clock.now();
+    const warmDone = await warmStepStart($, e);
     const result = yield* next(e);
+    if (result) await warmDone(result);
     if (result?.usage) {
       recordRequest(at, result.usage, e.model);
       // The request may have started an agent.
@@ -639,6 +652,7 @@ export function register(on, options) {
   // One context reading after each main turn (not subagents' turns).
   on("turn.complete", async ($, e, next) => {
     const result = await next(e);
+    await warmComplete($, e);
     // A subagent's turn: it may have just finished.
     if (e.agentId) {
       if (waiting[e.agentId]) {
@@ -681,6 +695,7 @@ export function register(on, options) {
   // next request writes a new cache, which is neither expired nor a miss.
   on("session.compact", async ($, e, next) => {
     const result = await next(e);
+    await warmCompact($, e, result);
     if (e.agentId || e.trigger === "precompute" || !result || typeof result.skip === "string") return result;
     try {
       const last = readings[readings.length - 1];
@@ -701,6 +716,7 @@ export function register(on, options) {
   on("session.measure", async ($, e, next) => {
     if (e.changed.includes("rateLimits") && e.rateLimits.length > 0) await shareLimits($, e.rateLimits);
     if (e.cost) cost = e.cost.usd;
+    await warmMeasure($, e);
     $.ui.invalidate("ui.render");
     return next(e);
   });
@@ -710,11 +726,23 @@ export function register(on, options) {
     if (props.hasSurvey || (readings.length === 0 && limits.list.length === 0)) return next(e);
     const elements = $.ui.resolve(e);
     const now = await $.clock.now();
+    warmLabel = await readWarm($);
     const line = drawLine(elements, e.surface, props.bodyColumns ?? 80, now);
     // Mods placed after us draw below our line; an empty drawing adds no blank line.
     const below = await next(e);
     return isBlank(below) ? line : elements.Box({ flexDirection: "column", children: [line, below] });
   });
+}
+
+// The cache-warming label cache-warm.ts keeps for this session ("☕ poke 14:32"), or "".
+async function readWarm($) {
+  if (!warmKey) return "";
+  try {
+    const label = await $.store.get(warmKey);
+    return typeof label === "string" ? label : "";
+  } catch {
+    return "";
+  }
 }
 
 // "en", "fr" or "ru": the language option when it names one, otherwise the environment's locale.
@@ -1353,7 +1381,7 @@ const KNOWN_TOKENS = [
 
 // The cache block as the terminal writes it: "cache 8 min · $2.32 at stake".
 function cacheText(state) {
-  return state ? [`${T.cache} ${state.value}`, state.detail, state.stake, state.advice].filter(Boolean).join(" · ") : "";
+  return state ? [`${T.cache} ${state.value}`, state.detail, state.stake, state.advice, warmLabel].filter(Boolean).join(" · ") : "";
 }
 
 // ---------- Blocks ----------
@@ -1412,7 +1440,7 @@ function cacheBlock({ Text, Svg }, mode, state) {
   // terminal the advice the app keeps for the tooltip).
   if (mode !== "none") {
     const lead = state.urgent ? state.detail : "";
-    const rest = [state.urgent ? "" : state.detail, state.stake, mode === "text" ? state.advice : ""].filter(Boolean).join(" · ");
+    const rest = [state.urgent ? "" : state.detail, state.stake, mode === "text" ? state.advice : "", warmLabel].filter(Boolean).join(" · ");
     if (mode === "svg" && (lead || rest)) parts.push(divider(Text, "s"));
     if (lead) parts.push(Text({ key: "d", bold: true, color: TONES.fast.text, children: mode === "svg" ? lead : `· ${lead}` }));
     if (rest) parts.push(Text({ key: "e", dimColor: true, children: mode === "svg" && !lead ? rest : `· ${rest}` }));

@@ -1,1 +1,1 @@
-{ "modules": ["./token-weather-usage.mjs"] }
+{ "modules": ["./register.ts"] }
