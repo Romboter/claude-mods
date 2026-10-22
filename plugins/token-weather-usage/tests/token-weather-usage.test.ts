@@ -140,6 +140,15 @@ test("keeps what later mods draw under the line", async ($, on) => {
   expect(texts.indexOf("107k")).toBeLessThan(texts.indexOf("drawn after this mod"));
 });
 
+test("settings: the gear ends the band and a hidden pill goes", async ($, on) => {
+  world(on, {}, { settings: { language: "", hide: { context: true } } });
+  withUsage(on, LIMITS);
+  await $.session.start({ source: "startup", cwd: "/tmp" } as any);
+  const { ui, texts } = await band($, "terminal");
+  expect(texts).not.toContain("107k");
+  expect(await ui.findAll({ type: "Button" })).toHaveLength(1);
+});
+
 test("auto: French when LANG is French", async ($, on) => {
   world(on, { LANG: "fr_FR.UTF-8" });
   withUsage(on, LIMITS);

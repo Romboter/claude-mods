@@ -529,6 +529,24 @@ const LIMIT_ICONS = { five_hour: "gauge", seven_day: "calendar", spend_limit: "c
 // Columns the terminal may cover at the end of the band.
 const RESERVED_COLUMNS = 2;
 
+// Settings from the gear, kept in $.store across sessions: a language that overrides the option,
+// and the pills the person hid.
+const PILLS = ["context", "limits", "cache", "cost", "agents"];
+const LANGUAGES = ["auto", "en", "fr", "ru"];
+const SETTINGS_PANE = "token-weather-settings";
+let prefs = { language: "", hide: {} };
+
+async function applyLanguage($, option) {
+  T = TEXT[await languageOf($, prefs.language || option)];
+}
+
+async function change($, option, edit) {
+  edit();
+  await $.store.set("settings", prefs);
+  await applyLanguage($, option);
+  $.ui.invalidate("ui.render");
+}
+
 // Events both this module and cache-warm.ts need are hooked here once and handed on (warm*),
 // because an event cannot be registered twice.
 export function register(on, options) {
@@ -538,7 +556,11 @@ export function register(on, options) {
   on("session.start", async ($, e, next) => {
     ticker?.cancel();
     cacheTicker?.cancel();
-    T = TEXT[await languageOf($, language)];
+    try {
+      const saved = await $.store.get("settings");
+      if (saved) prefs = { language: saved.language || "", hide: saved.hide ?? {} };
+    } catch {}
+    await applyLanguage($, language);
     readings = [];
     limits = { at: 0, list: [] };
     cache = null;
@@ -733,10 +755,25 @@ export function register(on, options) {
     const elements = $.ui.resolve(e);
     const now = await $.clock.now();
     warm = await readWarm($);
-    const line = drawLine(elements, e.surface, props.bodyColumns ?? 80, now);
+    const line = drawLine(elements, e.surface, props.bodyColumns ?? 80, now, $);
     // Mods placed after us draw below our line; an empty drawing adds no blank line.
     const below = await next(e);
     return isBlank(below) ? line : elements.Box({ flexDirection: "column", children: [line, below] });
+  });
+
+  on("ui.render", { component: "Pane", requestId: SETTINGS_PANE }, async ($, e) => {
+    const { Box, Text, Button } = $.ui.resolve(e);
+    const row = (key, label, value, onPress) =>
+      Box({ key, flexDirection: "row", columnGap: 1, children: [Text({ key: "l", children: label }), Button({ key: "b", label: value, onPress })] });
+    const next = LANGUAGES[(LANGUAGES.indexOf(prefs.language || "auto") + 1) % LANGUAGES.length];
+    return Box({
+      flexDirection: "column",
+      children: [
+        row("language", "Language", prefs.language || "auto", () => change($, language, () => (prefs.language = next === "auto" ? "" : next))),
+        Text({ key: "h", dimColor: true, children: "Pills shown" }),
+        ...PILLS.map((pill) => row(pill, pill, prefs.hide[pill] ? "hidden" : "shown", () => change($, language, () => (prefs.hide[pill] = !prefs.hide[pill])))),
+      ],
+    });
   });
 }
 
@@ -1504,18 +1541,19 @@ function svgGauge(g) {
 
 // ---------- Line ----------
 
-function drawLine(elements, surface, columns, now) {
-  const { Box, Text, Svg } = elements;
+function drawLine(elements, surface, columns, now, $) {
+  const { Box, Text, Svg, Button } = elements;
+  const hide = prefs.hide;
   const desktop = surface === "desktop" && !!Svg;
   // A window that already reset has no valid reading: hidden until the next one.
-  const gauges = limits.list.filter((limit) => !(Date.parse(limit.resetsAt ?? "") <= now)).map((limit) => gaugeOf(limit, now));
-  const cacheNow = cacheState(now);
+  const gauges = hide.limits ? [] : limits.list.filter((limit) => !(Date.parse(limit.resetsAt ?? "") <= now)).map((limit) => gaugeOf(limit, now));
+  const cacheNow = hide.cache ? null : cacheState(now);
   // Drawn bars in the app; in the terminal, characters when the line fits, otherwise no bar or detail.
   let mode = "svg";
   if (!desktop) mode = textWidth(gauges, cacheNow) <= columns - RESERVED_COLUMNS ? "text" : "none";
 
   const blocks = [];
-  if (readings.length > 0) {
+  if (readings.length > 0 && !hide.context) {
     const cur = readings[readings.length - 1];
     const f = forecastFor(cur.percent);
     const title = T.contextAlt(T.weather[f.id], T.percent(cur.percent), short(cur.window));
@@ -1539,7 +1577,7 @@ function drawLine(elements, surface, columns, now) {
   for (const g of gauges) blocks.push(gaugeBlock(elements, mode, g));
   if (cacheNow) blocks.push(cacheBlock(elements, mode, cacheNow));
   // The cost goes first when the terminal is short of room.
-  if (cost !== null && cost >= 0.005 && mode !== "none") {
+  if (!hide.cost && cost !== null && cost >= 0.005 && mode !== "none") {
     const parts = [Text({ key: "v", bold: true, children: T.cost(cost) })];
     const share = lastPromptText();
     if (desktop) {
@@ -1556,7 +1594,7 @@ function drawLine(elements, surface, columns, now) {
   // Agents last. In the app the pill stays, its card splitting the cost by model and effort; in
   // the terminal the count shows once the thread has run one.
   const crew = teamSize();
-  if (desktop || crew > 0) {
+  if (!hide.agents && (desktop || crew > 0)) {
     const parts = [];
     if (desktop) parts.push(icon(Svg, "i", "agents", ICON_COLORS.agents, T.icons.agents));
     parts.push(Text({ key: "v", bold: true, children: agentsText(crew, desktop) }));
@@ -1582,6 +1620,7 @@ function drawLine(elements, surface, columns, now) {
         ...(pillFill ? { backgroundColor: b.tint[0] } : {}),
       }),
     );
+    pills.push(gear(Button, $));
     // A narrow window wraps the pills onto a second line instead of clipping the last ones (#2).
     return Box({ flexDirection: "row", flexWrap: "wrap", alignItems: "center", columnGap: 1, rowGap: 1, paddingX: 1, children: pills });
   }
@@ -1590,14 +1629,20 @@ function drawLine(elements, surface, columns, now) {
     if (i > 0) children.push(Box({ key: "sep-" + i, paddingX: 1, children: [Text({ dimColor: true, children: SEP })] }));
     children.push(Box(row(b)));
   });
+  children.push(Box({ key: "gear-box", paddingX: 1, children: [gear(Button, $)] }));
   return Box({ flexDirection: "row", alignItems: "center", paddingX: 1, children });
+}
+
+// The gear at the end of the band: opens the settings pane.
+function gear(Button, $) {
+  return Button({ key: "gear", label: "⚙", plain: true, dimColor: true, onPress: () => $.ui.open({ id: SETTINGS_PANE, title: "Token Weather settings", focus: true, closeOnEscape: true }) });
 }
 
 // Width of the terminal line in characters, with the bars and details.
 function textWidth(gauges, cacheNow) {
   let width = 0;
   let blocks = 0;
-  if (readings.length > 0) {
+  if (readings.length > 0 && !prefs.hide.context) {
     const cur = readings[readings.length - 1];
     width += 2 + short(cur.tokens).length;
     if (readings.length >= 2) width += 1 + turnDeltas().length + 1 + trendWord().length;
@@ -1609,12 +1654,12 @@ function textWidth(gauges, cacheNow) {
     width += cacheText(cacheNow).length;
     blocks++;
   }
-  if (cost !== null && cost >= 0.005) {
+  if (!prefs.hide.cost && cost !== null && cost >= 0.005) {
     const share = lastPromptText();
     width += T.cost(cost).length + (share ? 3 + share.length : 0);
     blocks++;
   }
-  if (teamSize() > 0) {
+  if (!prefs.hide.agents && teamSize() > 0) {
     width += agentsText(teamSize(), false).length;
     blocks++;
   }
