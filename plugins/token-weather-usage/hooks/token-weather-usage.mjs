@@ -535,12 +535,14 @@ const PILLS = ["context", "limits", "cache", "cost", "agents"];
 const LANGUAGES = ["auto", "en", "fr", "ru"];
 const SETTINGS_PANE = "token-weather-settings";
 let prefs = { language: "", hide: {} };
+let languageOption;
 
 async function applyLanguage($, option) {
   T = TEXT[await languageOf($, prefs.language || option)];
 }
 
-async function change($, option, edit) {
+async function change($, edit) {
+  const option = languageOption;
   edit();
   await $.store.set("settings", prefs);
   await applyLanguage($, option);
@@ -551,6 +553,7 @@ async function change($, option, edit) {
 // because an event cannot be registered twice.
 export function register(on, options) {
   const language = options?.language;
+  languageOption = language;
   pillFill = options?.background !== "off";
 
   on("session.start", async ($, e, next) => {
@@ -769,9 +772,9 @@ export function register(on, options) {
     return Box({
       flexDirection: "column",
       children: [
-        row("language", "Language", prefs.language || "auto", () => change($, language, () => (prefs.language = next === "auto" ? "" : next))),
+        row("language", "Language", prefs.language || "auto", () => change($, () => (prefs.language = next === "auto" ? "" : next))),
         Text({ key: "h", dimColor: true, children: "Pills shown" }),
-        ...PILLS.map((pill) => row(pill, pill, prefs.hide[pill] ? "hidden" : "shown", () => change($, language, () => (prefs.hide[pill] = !prefs.hide[pill])))),
+        ...PILLS.map((pill) => row(pill, pill, prefs.hide[pill] ? "hidden" : "shown", () => change($, () => (prefs.hide[pill] = !prefs.hide[pill])))),
       ],
     });
   });
@@ -1620,7 +1623,7 @@ function drawLine(elements, surface, columns, now, $) {
         ...(pillFill ? { backgroundColor: b.tint[0] } : {}),
       }),
     );
-    pills.push(gear(Button, $));
+    pills.push(gear(elements, $));
     // A narrow window wraps the pills onto a second line instead of clipping the last ones (#2).
     return Box({ flexDirection: "row", flexWrap: "wrap", alignItems: "center", columnGap: 1, rowGap: 1, paddingX: 1, children: pills });
   }
@@ -1629,13 +1632,33 @@ function drawLine(elements, surface, columns, now, $) {
     if (i > 0) children.push(Box({ key: "sep-" + i, paddingX: 1, children: [Text({ dimColor: true, children: SEP })] }));
     children.push(Box(row(b)));
   });
-  children.push(Box({ key: "gear-box", paddingX: 1, children: [gear(Button, $)] }));
+  children.push(Box({ key: "gear-box", paddingX: 1, children: [gear(elements, $)] }));
   return Box({ flexDirection: "row", alignItems: "center", paddingX: 1, children });
 }
 
-// The gear at the end of the band: opens the settings pane.
-function gear(Button, $) {
-  return Button({ key: "gear", label: "⚙", plain: true, dimColor: true, onPress: () => $.ui.open({ id: SETTINGS_PANE, title: "Token Weather settings", focus: true, closeOnEscape: true }) });
+// The gear at the end of the band: hovering it shows the settings, pressing it opens them in a pane.
+function gear({ Box, Text, Button }, $) {
+  const nextLanguage = LANGUAGES[(LANGUAGES.indexOf(prefs.language || "auto") + 1) % LANGUAGES.length];
+  const item = (key, label, value, edit) =>
+    Box({ key, flexDirection: "row", columnGap: 1, children: [Text({ key: "l", children: label }), Button({ key: "b", label: value, onPress: () => change($, edit) })] });
+  const card = Box({
+    position: "absolute",
+    bottom: 1,
+    right: 0,
+    display: "none",
+    hover: { display: "flex" },
+    flexDirection: "column",
+    paddingX: 1,
+    borderStyle: "round",
+    borderColor: CARD.line,
+    backgroundColor: CARD.back,
+    children: [
+      item("language", "Language", prefs.language || "auto", () => (prefs.language = nextLanguage === "auto" ? "" : nextLanguage)),
+      ...PILLS.map((pill) => item(pill, pill, prefs.hide[pill] ? "hidden" : "shown", () => (prefs.hide[pill] = !prefs.hide[pill]))),
+    ],
+  });
+  const open = () => $.ui.open({ id: SETTINGS_PANE, title: "Token Weather settings", focus: true, closeOnEscape: true });
+  return Box({ key: "gear", children: [Button({ key: "open", label: "⚙", plain: true, dimColor: true, onPress: open }), card] });
 }
 
 // Width of the terminal line in characters, with the bars and details.

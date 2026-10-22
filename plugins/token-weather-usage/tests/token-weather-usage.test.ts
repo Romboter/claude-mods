@@ -146,7 +146,7 @@ test("settings: the gear ends the band and a hidden pill goes", async ($, on) =>
   await $.session.start({ source: "startup", cwd: "/tmp" } as any);
   const { ui, texts } = await band($, "terminal");
   expect(texts).not.toContain("107k");
-  expect(await ui.findAll({ type: "Button" })).toHaveLength(1);
+  expect(await ui.findAll({ type: "Button" })).toHaveLength(7);
 });
 
 test("auto: French when LANG is French", async ($, on) => {
