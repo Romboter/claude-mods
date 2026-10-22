@@ -612,6 +612,8 @@ let prefs = { v: {}, hide: {} };
 let languageOption;
 let lang = "en";
 let tab = "show";
+// VS Code ignores hover and absolute positioning: the gear is a button that opens the panel inline.
+let panelOpen = false;
 
 const cfg = (key) => prefs.v[key] ?? DEFAULTS[key];
 const num = (key) => Number(cfg(key));
@@ -1638,7 +1640,7 @@ function drawLine(elements, surface, columns, now, $, extra = null) {
   const { Box, Text, Svg, Button } = elements;
   const hide = prefs.hide;
   const grow = extra ?? 0;
-  const desktop = surface === "desktop" && !!Svg;
+  const desktop = ["desktop", "vscode"].includes(surface) && !!Svg;
   // A window that already reset has no valid reading: hidden until the next one.
   const gauges = hide.limits ? [] : limits.list.filter((limit) => !(Date.parse(limit.resetsAt ?? "") <= now)).map((limit) => gaugeOf(limit, now));
   let cacheNow = hide.cache ? null : cacheState(now);
@@ -1720,6 +1722,7 @@ function drawLine(elements, surface, columns, now, $, extra = null) {
     else if (spare > 40 && cfg("stretch") === "on" && gauges.length + sparks > 0) each = Math.floor((spare * 0.85) / (gauges.length + sparks));
     return drawLine(elements, surface, columns, now, $, each);
   }
+  const inline = surface === "vscode";
   if (desktop) {
     // Pills: tinted, outlined, side by side. The app rounds a Box only through its border, and
     // a border brings a padding that made the band taller than the prompt box: paddingY, set
@@ -1730,7 +1733,7 @@ function drawLine(elements, surface, columns, now, $, extra = null) {
       Box({
         ...row(b),
         ...stretch,
-        children: b.tip && cfg("cards") === "on" ? [...b.parts, hoverCard(Box, Text, b.tip)] : b.parts,
+        children: !inline && b.tip && cfg("cards") === "on" ? [...b.parts, hoverCard(Box, Text, b.tip)] : b.parts,
         flexShrink: 0,
         paddingX: 1,
         paddingY: 0,
@@ -1740,6 +1743,13 @@ function drawLine(elements, surface, columns, now, $, extra = null) {
     );
     // The gear sits at the right edge, out of the flow: a flex item of its own took a gap's
     // width, enough to wrap the line. The band keeps room for it on the right.
+    if (inline) {
+      const { button, card } = gear(elements, $, true);
+      pills.push(Box({ key: "gear-box", children: [button] }));
+      const tips = blocks.filter((b) => b.tip).map((b) => Box({ key: "tip-" + b.key, flexDirection: "column", children: String(b.tip).split(String.fromCharCode(10)).map((line, i) => Text({ key: "t" + i, dimColor: i > 0, children: line })) }));
+      const row = Box({ flexDirection: "row", flexWrap: "wrap", alignItems: "center", columnGap: 1, rowGap: 1, paddingX: 1, children: pills });
+      return panelOpen ? Box({ flexDirection: "column", children: [row, Box({ key: "panel", flexDirection: "column", rowGap: 1, paddingX: 1, children: [...tips, card] })] }) : row;
+    }
     pills.push(Box({ key: "gear-box", position: "absolute", top: 0, right: 0, children: [gear(elements, $)] }));
     // A narrow window wraps the pills onto a second line instead of clipping the last ones (#2).
     return Box({ flexDirection: "row", flexWrap: "wrap", alignItems: "center", columnGap: 1, rowGap: 1, paddingLeft: 1, paddingRight: GEAR_COLUMNS, children: pills });
@@ -1785,7 +1795,7 @@ function contextText(cur) {
 }
 
 // The gear at the end of the band: hovering it shows the settings.
-function gear({ Box, Text, Button, Svg }, $) {
+function gear({ Box, Text, Button, Svg }, $, inline = false) {
   // A label on the left, its button on the right.
   const item = (key, label, value, edit, dim) =>
     Box({
@@ -1821,11 +1831,7 @@ function gear({ Box, Text, Button, Svg }, $) {
   if (tab === "show") PILLS.forEach((pill) => rows.push(item(pill, PILL_NAMES[pill], prefs.hide[pill] ? "○ hidden" : "● shown", () => (prefs.hide[pill] = !prefs.hide[pill]), !!prefs.hide[pill])));
   if (tab === "look") rows.push(item("reset", "Settings", "reset to defaults", () => (prefs = { v: {}, hide: {} })));
   const card = Box({
-    position: "absolute",
-    bottom: 1,
-    right: 0,
-    display: "none",
-    hover: { display: "flex" },
+    ...(inline ? {} : { position: "absolute", bottom: 1, right: 0, display: "none", hover: { display: "flex" } }),
     flexDirection: "column",
     minWidth: 34,
     paddingX: 1,
@@ -1834,6 +1840,7 @@ function gear({ Box, Text, Button, Svg }, $) {
     backgroundColor: CARD.back,
     children: [Text({ key: "title", bold: true, children: "Token Weather" }), tabs, Box({ key: "gap", height: 1 }), ...rows],
   });
+  if (inline) return { button: Button({ key: "open", label: "⚙", dimColor: !panelOpen, onPress: () => { panelOpen = !panelOpen; $.ui.invalidate("ui.render"); } }), card };
   const glyph = Svg ? icon(Svg, "open", "gear", ICON_COLORS.gear, "Settings") : Text({ key: "open", dimColor: true, children: "⚙" });
   return Box({ key: "gear", children: [glyph, card] });
 }
