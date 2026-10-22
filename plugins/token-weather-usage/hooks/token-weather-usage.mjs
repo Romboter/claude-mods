@@ -16,7 +16,7 @@
 // The engine reads on(...) and $.noun.method(...) from the source: they stay spelled out,
 // and the functions that take $ live at the top level.
 
-import { warmCompact, warmComplete, warmEnd, warmMeasure, warmStart, warmStepStart } from "./cache-warm";
+import { warmCompact, warmComplete, warmEnd, warmMeasure, warmSet, warmStart, warmStepStart, warmView } from "./cache-warm";
 
 // ---------- Language ----------
 
@@ -54,6 +54,12 @@ const TEXT = {
     recentLasts: (gained, over) => `At the last ${over}'s pace (+${gained}), it would last until the reset.`,
     lastPrompt: (usd) => `+$${usd.toFixed(2)}`,
     lastPrompt5h: (points) => `+${decimal(points)}% 5h`,
+    tokensOf: (a, b) => `${a} of ${b} tokens`,
+    roomLeft: (n) => `${n} left in the window`,
+    promptsLeft: (n) => `about ${n} more prompts at the recent pace`,
+    recentPrompts: (list) => `Recent prompts: ${list}`,
+    elapsed: (pct) => `${pct} of the window has passed`,
+    pace: (d) => (d > 0 ? `${d}% ahead of the clock` : d < 0 ? `${-d}% behind the clock` : "right on the clock"),
     toRewrite: (tokens) => `${tokens} to rewrite`,
     newThread: "new thread",
     // $2.32, $182 from 100 dollars, < $0.01 under a cent.
@@ -130,6 +136,12 @@ const TEXT = {
     recentLasts: (gained, over) => `Au rythme des dernières ${over} (+${gained}), elle tiendrait jusqu’à la remise à zéro.`,
     lastPrompt: (usd) => `+${usd.toFixed(2).replace(".", ",")} $`,
     lastPrompt5h: (points) => `+${decimal(points).replace(".", ",")} % 5h`,
+    tokensOf: (a, b) => `${a} sur ${b} tokens`,
+    roomLeft: (n) => `${n} restants dans la fenêtre`,
+    promptsLeft: (n) => `environ ${n} prompts de plus au rythme récent`,
+    recentPrompts: (list) => `Derniers prompts : ${list}`,
+    elapsed: (pct) => `${pct} de la fenêtre écoulé`,
+    pace: (d) => (d > 0 ? `${d} % d'avance sur l'horloge` : d < 0 ? `${-d} % de retard sur l'horloge` : "pile à l'heure"),
     toRewrite: (tokens) => `${tokens} à réécrire`,
     newThread: "nouveau fil",
     money: (usd) => (usd < 0.01 ? "< 0,01 $" : `${amount(usd).replace(".", ",")} $`),
@@ -202,6 +214,12 @@ const TEXT = {
     recentLasts: (gained, over) => `При темпе последних ${over} (+${gained}) лимита хватит до сброса.`,
     lastPrompt: (usd) => `+${usd.toFixed(2).replace(".", ",")} $`,
     lastPrompt5h: (points) => `+${decimal(points).replace(".", ",")}% 5ч`,
+    tokensOf: (a, b) => `${a} из ${b} токенов`,
+    roomLeft: (n) => `осталось ${n} в окне`,
+    promptsLeft: (n) => `ещё около ${n} промптов при недавнем темпе`,
+    recentPrompts: (list) => `Последние промпты: ${list}`,
+    elapsed: (pct) => `прошло ${pct} окна`,
+    pace: (d) => (d > 0 ? `опережение часов на ${d}%` : d < 0 ? `отставание от часов на ${-d}%` : "точно по часам"),
     toRewrite: (tokens) => `${tokens} к перезаписи`,
     newThread: "новый тред",
     money: (usd) => (usd < 0.01 ? "< 0,01 $" : `${amount(usd).replace(".", ",")} $`),
@@ -269,7 +287,8 @@ function approx(usd) {
 
 // ---------- Context weather (Token Weather) ----------
 
-const HISTORY = 12;
+// Readings kept per session: enough for the most prompt bars a filled band can draw.
+const HISTORY = 40;
 const BARS = "▁▂▃▄▅▆▇█";
 const FORECAST = [
   // Single-column symbols, no emoji: they line up in every font.
@@ -282,7 +301,6 @@ const FORECAST = [
 
 // Turn bars: tokens added by each recent prompt; the current prompt takes the weather's tint
 // (colors readable on light and dark backgrounds), earlier ones stay grey.
-const TURN_BARS = 5;
 const SPARK = { height: 14, bar: 5.5, gap: 2 };
 const PAST_BAR = "rgba(127,127,127,0.45)";
 const SPARK_COLORS = { yellow: "#e0b000", cyan: "#1ba1c4", blue: "#2f68c0", magenta: "#b04fc0", red: "#d64545" };
@@ -317,6 +335,8 @@ function hoverCard(Box, Text, tip) {
     display: "none",
     hover: { display: "flex" },
     flexDirection: "column",
+    // As wide as the longest line (and its border and padding), so nothing wraps.
+    minWidth: Math.min(CARD_MAX, Math.max(...lines.map((line) => line.length)) + 4),
     paddingX: 1,
     paddingY: 0,
     borderStyle: "round",
@@ -344,6 +364,8 @@ let turnsKey = null;
 // cache pill's bolt and adds its lines to the hover card.
 let warmKey = null;
 let warm = null;
+// The cache-warming settings cache-warm.ts keeps, for the gear's Warm tab.
+let caffeine = null;
 // Bolt color per warming state; off keeps the pill's own tone.
 const WARM_COLORS = { warm: "#3a9a62", poking: "#1b9cbe", paused: "#d9962b", cold: "#d64545", waiting: "#8ea3b8", wake: "#8a5fd0" };
 
@@ -358,8 +380,6 @@ const SPANS = { five_hour: 5 * HOUR, seven_day: 7 * DAY };
 const ORDER = ["five_hour", "seven_day", "spend_limit"];
 // Pace = share used minus share of time elapsed, in points.
 // Above 0: using faster than time; beyond 15, or at 90% used: alert.
-const PACE_ALERT = 15;
-const USED_ALERT = 90;
 // Limits belong to the account: the latest reading, across sessions, lives in $.store.
 const SHARED_KEY = "limits";
 
@@ -377,7 +397,6 @@ const PACE_SPAN = DAY;
 const PACE_MIN_SPAN = 6 * HOUR;
 const OUT_MIN_ELAPSED = DAY;
 const OUT_MIN_USED = 15;
-const OUT_ALERT = DAY;
 let week = [];
 let ticker = null;
 
@@ -388,13 +407,10 @@ let ticker = null;
 // message writes the whole context again. Mods get the token counts, not the lifetime: it is
 // inferred (Claude Code's rules, then what the traffic shows).
 const TTL = { "5m": 5 * MINUTE, "1h": HOUR };
-// Yellow under 10 minutes left.
-const CACHE_SOON = 10 * MINUTE;
+// Yellow when the time left drops under the cache warning (10 minutes by default).
 // From this context size, an expired cache suggests /compact before going on.
-const COMPACT_AT = 100_000;
 // From this one, a new thread instead: after a pause the next message writes the whole context
 // again at full price; a new thread avoids that rewrite, a compaction would read it all again.
-const LARGE_CONTEXT = 300_000;
 // A request that read less than half its prompt from the cache, and wrote more than this, missed.
 const MISS_SHARE = 50;
 const MISS_WRITE = 1_000;
@@ -511,6 +527,9 @@ const ICONS = {
   // A clock turning back: the time left before the window starts over.
   clock: (c) =>
     `<path d="M4.2 13A8 8 0 1 0 6.6 6.2" fill="none" stroke="${c}" stroke-width="2.1" stroke-linecap="round"/><path d="M3.4 3.6v4.2h4.2" fill="none" stroke="${c}" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/><path d="M12 8v4.6l3 1.8" fill="none" stroke="${c}" stroke-width="2.1" stroke-linecap="round"/>`,
+  // Eight teeth around a ring, a hub in the middle.
+  gear: (c) =>
+    `<circle cx="12" cy="12" r="6" fill="none" stroke="${c}" stroke-width="2.2"/><circle cx="12" cy="12" r="2.2" fill="${c}"/><path d="${[0, 1, 2, 3, 4, 5, 6, 7].map((k) => { const a = (k * Math.PI) / 4, x = Math.sin(a), y = -Math.cos(a); return `M${(12 + 6 * x).toFixed(1)} ${(12 + 6 * y).toFixed(1)}L${(12 + 9.6 * x).toFixed(1)} ${(12 + 9.6 * y).toFixed(1)}`; }).join("")}" fill="none" stroke="${c}" stroke-width="2.6" stroke-linecap="round"/>`,
   bolt: (c) => `<path d="M13.2 2 4 13.6h7.2L10.4 22l9.2-11.6h-7.2z" fill="${c}" fill-opacity="0.18" stroke="${c}" stroke-width="2" stroke-linejoin="round"/>`,
   coin: (c) =>
     `<circle cx="12" cy="12" r="9.5" fill="${c}" fill-opacity="0.16" stroke="${c}" stroke-width="2"/><path d="M15 8.8c-.5-1-1.6-1.6-3-1.6-1.7 0-3 .9-3 2.2s1.3 1.8 3 2.1 3 .9 3 2.2-1.3 2.3-3 2.3c-1.4 0-2.5-.6-3.1-1.6M12 5.6v1.6M12 16.8v1.6" fill="none" stroke="${c}" stroke-width="1.9" stroke-linecap="round"/>`,
@@ -522,30 +541,98 @@ const ICONS = {
     `<rect x="4" y="7.5" width="16" height="12.5" rx="3.5" fill="${c}" fill-opacity="0.14" stroke="${c}" stroke-width="2"/><path d="M12 7.5V4M2 12.5v3M22 12.5v3" fill="none" stroke="${c}" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="3.2" r="1.3" fill="${c}"/><circle cx="9" cy="13" r="1.5" fill="${c}"/><circle cx="15" cy="13" r="1.5" fill="${c}"/><path d="M9.5 16.8h5" fill="none" stroke="${c}" stroke-width="1.8" stroke-linecap="round"/>`,
 };
 // The tint behind each pill in the app; the "background" option set to off leaves only the colored outline.
-let pillFill = true;
 // Icon color per block: deeper than the pill's tint, readable on light and dark backgrounds.
-const ICON_COLORS = { five_hour: "#3a9a62", seven_day: "#8a5fd0", spend_limit: "#b8892a", calm: "#1b9cbe", fast: "#d9962b", alert: "#d64545", cost: "#b8892a", agents: "#c4507f" };
+const ICON_COLORS = { gear: "#8a8f98", five_hour: "#3a9a62", seven_day: "#8a5fd0", spend_limit: "#b8892a", calm: "#1b9cbe", fast: "#d9962b", alert: "#d64545", cost: "#b8892a", agents: "#c4507f" };
 const LIMIT_ICONS = { five_hour: "gauge", seven_day: "calendar", spend_limit: "coin" };
 // Columns the terminal may cover at the end of the band.
 const RESERVED_COLUMNS = 2;
+// Pixels per terminal column in the app, rounded down, and the gear with its gap.
+const PX_COLUMN = 7.5;
+const GEAR_COLUMNS = 4;
+const GEAR_PX = GEAR_COLUMNS * PX_COLUMN;
+const SLACK = 0.06;
+// The widest a hover card grows, in columns, before its lines wrap.
+const CARD_MAX = 100;
+const MIN_GAUGE = 24;
 
-// Settings from the gear, kept in $.store across sessions: a language that overrides the option,
-// and the pills the person hid.
+// Settings from the gear, kept in $.store across sessions. Each is a choice among a few values,
+// the first the default: [tab, key, label, [[value, label], ...]].
+const ONOFF = [["on", "on"], ["off", "off"]];
+const TABS = [["show", "Show"], ["values", "Values"], ["format", "Format"], ["alerts", "Alerts"], ["caffeine", "Warmer"], ["look", "Look"]];
+const SETTINGS = [
+  ["values", "context", "Context", [["tokens", "tokens"], ["percent", "percent"], ["both", "both"]]],
+  ["values", "weather", "Weather icon", ONOFF],
+  ["values", "trend", "Trend", ONOFF],
+  ["values", "bars", "Prompt bars", [["5", "5"], ["0", "off"], ["3", "3"], ["8", "8"]]],
+  ["values", "scale", "Bar scale", [["log", "log"], ["linear", "linear"]]],
+  ["values", "limits", "5h / 7d shows", [["both", "% + time"], ["percent", "%"], ["time", "time"], ["bar", "bar only"]]],
+  ["values", "amount", "5h / 7d amount", [["used", "used"], ["left", "left"]]],
+  ["values", "resets", "5h / 7d reset", [["countdown", "countdown"], ["clock", "clock time"], ["both", "clock + countdown"]]],
+  ["values", "runOut", "Run-out warning", ONOFF],
+  ["values", "cache", "Cache shows", [["time", "time"], ["clock", "clock time"], ["bolt", "bolt only"]]],
+  ["values", "cost", "Cost shows", [["total", "total"], ["last", "last prompt"], ["points", "last, in 5h %"]]],
+  ["values", "agents", "Agents show", [["auto", "running · total"], ["running", "running"], ["total", "total"]]],
+  ["format", "language", "Language", [["auto", "auto"], ["en", "en"], ["fr", "fr"], ["ru", "ru"]]],
+  ["format", "numbers", "Numbers", [["short", "107k"], ["full", "107,000"]]],
+  ["format", "clock", "Clock", [["24", "24-hour"], ["12", "12-hour"]]],
+  ["format", "percent", "Percent sign", [["auto", "by language"], ["tight", "24%"], ["spaced", "24 %"]]],
+  ["alerts", "compactAt", "Compact soon at", [["100000", "100k"], ["50000", "50k"], ["150000", "150k"], ["200000", "200k"]]],
+  ["alerts", "largeContext", "New thread at", [["300000", "300k"], ["200000", "200k"], ["400000", "400k"], ["500000", "500k"]]],
+  ["alerts", "cacheSoon", "Cache warning", [["10", "10 min"], ["5", "5 min"], ["15", "15 min"]]],
+  ["alerts", "paceAlert", "Limit red ahead by", [["15", "15%"], ["10", "10%"], ["25", "25%"], ["35", "35%"]]],
+  ["alerts", "usedAlert", "Limit red at", [["90", "90%"], ["80", "80%"], ["95", "95%"], ["100", "100%"]]],
+  ["alerts", "outAlert", "Run-out red within", [["24", "1 day"], ["12", "12 h"], ["48", "2 days"], ["72", "3 days"]]],
+  ["alerts", "red", "Red warnings", ONOFF],
+  ["look", "fill", "Pill fill", ONOFF],
+  ["look", "borders", "Pill borders", ONOFF],
+  ["look", "cards", "Hover cards", ONOFF],
+  ["look", "stretch", "Fill the bar", [["off", "off"], ["on", "on"]]],
+  ["look", "order", "Order", [["default", "default"], ["limits", "limits first"], ["cache", "cache first"], ["cost", "cost first"]]],
+];
+// The Warm tab: cache-warm.ts keeps these, not the prefs. Pressing one cycles to the next value.
+const CAFFEINE = [
+  ["auto", "Turn on past", [["0", "never"], ["50000", "50k"], ["100000", "100k"], ["200000", "200k"]]],
+  ["ttl", "Cache lifetime", [["auto", "auto"], ["5m", "5 min"], ["1h", "1 hour"]]],
+  ["idle", "Off after idle", [["3600000", "1 h"], ["14400000", "4 h"], ["28800000", "8 h"], ["86400000", "24 h"]]],
+  ["wakeAuto", "Wake at the limit", [["off", "off"], ["on", "on"]]],
+];
+const DEFAULTS = Object.fromEntries(SETTINGS.map(([, key, , choices]) => [key, choices[0][0]]));
 const PILLS = ["context", "limits", "cache", "cost", "agents"];
-const LANGUAGES = ["auto", "en", "fr", "ru"];
-const SETTINGS_PANE = "token-weather-settings";
-let prefs = { language: "", hide: {} };
+const PILL_NAMES = { context: "Context", limits: "5h / 7d limits", cache: "Cache", cost: "Cost", agents: "Agents" };
+// Pills in each order; a window's gauges count as "limits".
+const ORDERS = {
+  default: PILLS,
+  limits: ["limits", "context", "cache", "cost", "agents"],
+  cache: ["cache", "context", "limits", "cost", "agents"],
+  cost: ["cost", "context", "limits", "cache", "agents"],
+};
+// "left" after a remaining share, in each language.
+const LEFT = { en: "left", fr: "restant", ru: "осталось" };
+let prefs = { v: {}, hide: {} };
 let languageOption;
+let lang = "en";
+let tab = "show";
+
+const cfg = (key) => prefs.v[key] ?? DEFAULTS[key];
+const num = (key) => Number(cfg(key));
 
 async function applyLanguage($, option) {
-  T = TEXT[await languageOf($, prefs.language || option)];
+  const choice = cfg("language");
+  lang = await languageCode($, choice === "auto" ? option : choice);
+  T = TEXT[lang];
+  const percent = cfg("percent");
+  if (percent !== "auto") T = { ...T, percent: (n) => (percent === "tight" ? `${n}%` : `${n} %`) };
+}
+
+async function caffeinate($, key, value) {
+  await warmSet($, key, value);
+  $.ui.invalidate("ui.render");
 }
 
 async function change($, edit) {
-  const option = languageOption;
   edit();
   await $.store.set("settings", prefs);
-  await applyLanguage($, option);
+  await applyLanguage($, languageOption);
   $.ui.invalidate("ui.render");
 }
 
@@ -554,14 +641,14 @@ async function change($, edit) {
 export function register(on, options) {
   const language = options?.language;
   languageOption = language;
-  pillFill = options?.background !== "off";
+  if (options?.background === "off") DEFAULTS.fill = "off";
 
   on("session.start", async ($, e, next) => {
     ticker?.cancel();
     cacheTicker?.cancel();
     try {
       const saved = await $.store.get("settings");
-      if (saved) prefs = { language: saved.language || "", hide: saved.hide ?? {} };
+      if (saved) prefs = { v: saved.v ?? {}, hide: saved.hide ?? {} };
     } catch {}
     await applyLanguage($, language);
     readings = [];
@@ -758,25 +845,11 @@ export function register(on, options) {
     const elements = $.ui.resolve(e);
     const now = await $.clock.now();
     warm = await readWarm($);
+    caffeine = await warmView($).catch(() => null);
     const line = drawLine(elements, e.surface, props.bodyColumns ?? 80, now, $);
     // Mods placed after us draw below our line; an empty drawing adds no blank line.
     const below = await next(e);
     return isBlank(below) ? line : elements.Box({ flexDirection: "column", children: [line, below] });
-  });
-
-  on("ui.render", { component: "Pane", requestId: SETTINGS_PANE }, async ($, e) => {
-    const { Box, Text, Button } = $.ui.resolve(e);
-    const row = (key, label, value, onPress) =>
-      Box({ key, flexDirection: "row", columnGap: 1, children: [Text({ key: "l", children: label }), Button({ key: "b", label: value, onPress })] });
-    const next = LANGUAGES[(LANGUAGES.indexOf(prefs.language || "auto") + 1) % LANGUAGES.length];
-    return Box({
-      flexDirection: "column",
-      children: [
-        row("language", "Language", prefs.language || "auto", () => change($, () => (prefs.language = next === "auto" ? "" : next))),
-        Text({ key: "h", dimColor: true, children: "Pills shown" }),
-        ...PILLS.map((pill) => row(pill, pill, prefs.hide[pill] ? "hidden" : "shown", () => change($, () => (prefs.hide[pill] = !prefs.hide[pill])))),
-      ],
-    });
   });
 }
 
@@ -792,7 +865,7 @@ async function readWarm($) {
 }
 
 // "en", "fr" or "ru": the language option when it names one, otherwise the environment's locale.
-async function languageOf($, choice) {
+async function languageCode($, choice) {
   if (choice === "en" || choice === "fr" || choice === "ru") return choice;
   let locale = "";
   try {
@@ -911,11 +984,13 @@ function gaugeOf(limit, now) {
   const left = Number.isFinite(resetMs) ? Math.max(0, resetMs - now) : null;
   const elapsed = span && left !== null ? bound(((span - left) / span) * 100) : null;
   const pace = elapsed === null ? 0 : used - elapsed;
-  const tone = used >= USED_ALERT || pace > PACE_ALERT ? "alert" : pace > 0 ? "fast" : "calm";
+  const tone = used >= num("usedAlert") || pace > num("paceAlert") ? (cfg("red") === "on" ? "alert" : "fast") : pace > 0 ? "fast" : "calm";
   // The time left; the 5-hour reset time goes to the clock's tooltip.
-  const when = left !== null ? duration(left) : "";
+  const resets = cfg("resets");
+  const at = left === null ? "" : limit.kind === "five_hour" ? clockTime(resetMs) : dateOf(resetMs);
+  const when = left === null ? "" : resets === "clock" ? at : resets === "both" ? `${at} · ${duration(left)}` : duration(left);
   const resetAt = left !== null && limit.kind === "five_hour" ? clockTime(resetMs) : "";
-  return { kind: limit.kind, label: T.labels[limit.kind] ?? limit.kind, used, elapsed, tone, value: T.percent(Math.round(used)), when, resetAt, out: runOutOf(limit, used, now) };
+  return { kind: limit.kind, label: T.labels[limit.kind] ?? limit.kind, used, elapsed, tone, value: T.percent(Math.round(cfg("amount") === "left" ? Math.max(0, 100 - used) : used)), when, resetAt, out: cfg("runOut") === "on" ? runOutOf(limit, used, now) : null };
 }
 
 // When the 7-day limit runs out at the recent pace, if before the reset: { at, left, gained, over, resetMs }.
@@ -978,7 +1053,7 @@ function duration(ms) {
 // 24-hour time in the machine's time zone; UTC when the runtime has no time zone data.
 function clockTime(ms) {
   try {
-    return new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(ms);
+    return new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit", hourCycle: cfg("clock") === "12" ? "h12" : "h23" }).format(ms);
   } catch {
     const d = new Date(ms);
     return `${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")} UTC`;
@@ -1120,11 +1195,11 @@ function cacheState(now) {
   // way out goes to the tooltip; the terminal, without one, keeps it on the line.
   if (left <= 0) {
     const rewrite = T.toRewrite(short(tokens));
-    const detail = tokens < COMPACT_AT ? "" : costs ? `${rewrite} ${approx(costs.rewrite)}` : rewrite;
-    const advice = tokens >= LARGE_CONTEXT ? T.newThread : tokens >= COMPACT_AT ? "/compact" : "";
+    const detail = tokens < num("compactAt") ? "" : costs ? `${rewrite} ${approx(costs.rewrite)}` : rewrite;
+    const advice = tokens >= num("largeContext") ? T.newThread : tokens >= num("compactAt") ? "/compact" : "";
     const tip = [T.tips.expired(short(tokens), costs && approx(costs.rewrite))];
-    if (tokens >= LARGE_CONTEXT) tip.push(T.tips.newThread);
-    else if (tokens >= COMPACT_AT) tip.push(T.tips.compact);
+    if (tokens >= num("largeContext")) tip.push(T.tips.newThread);
+    else if (tokens >= num("compactAt")) tip.push(T.tips.compact);
     return { tone: "alert", value: T.expired, detail, advice, tip: tip.join("\n") };
   }
   const share = hitOf(cache);
@@ -1136,9 +1211,9 @@ function cacheState(now) {
     const tip = T.tips.missed(T.percent(share), cause, short(cache.write ?? 0), surcharge !== null && approx(surcharge));
     return { tone: "fast", value: T.percent(share), detail: `${T.missed} · ${cause}${extra}`, tip };
   }
-  const time = left < MINUTE ? T.underMinute : duration(left);
-  const soon = left < CACHE_SOON;
   const expiry = clockTime(cache.at + ttl);
+  const time = cfg("cache") === "clock" ? expiry : left < MINUTE ? T.underMinute : duration(left);
+  const soon = left < num("cacheSoon") * MINUTE;
   // A cache that served the message (90% or more), or one just rebuilt after a compaction,
   // shows its time alone; below, the share first.
   const shown = share >= GOOD_HIT || cache.rebuilt ? { value: time, detail: "" } : { value: T.percent(share), detail: time };
@@ -1148,11 +1223,13 @@ function cacheState(now) {
     const tip = [T.tips.soon(expiry, short(tokens), costs && { read: approx(costs.read), rewrite: approx(costs.rewrite) })];
     return { tone: "fast", ...shown, urgent: true, stake, tip: tip.join("\n") };
   }
-  const tip = [T.tips.warm(expiry, ttl === TTL["1h"], seenTtl !== null), T.tips.lastRead(T.percent(share), short(cache.read ?? 0))];
+  // The figures first, the sentence about the lifetime last.
+  const tip = [T.tips.lastRead(T.percent(share), short(cache.read ?? 0))];
   if (costs) {
     tip.push(T.tips.costs(approx(costs.read), approx(costs.rewrite)));
     if (savedUsd >= 0.01) tip.push(T.tips.saved(approx(savedUsd)));
   }
+  tip.push(T.tips.warm(expiry, ttl === TTL["1h"], seenTtl !== null));
   return { tone: "calm", ...shown, urgent: false, tip: tip.join("\n") };
 }
 
@@ -1441,32 +1518,41 @@ function divider(Text, key) {
   return Text({ key, dimColor: true, children: SEP });
 }
 
-function gaugeBlock({ Box, Text, Svg }, mode, g) {
+function gaugeBlock({ Box, Text, Svg }, mode, g, grow = 0) {
   // The bar carries the color; the text stays in the theme's color, readable everywhere.
   const color = ICON_COLORS[g.kind] ?? ICON_COLORS.spend_limit;
   const parts = [];
   if (mode === "svg") parts.push(icon(Svg, "k", LIMIT_ICONS[g.kind] ?? "coin", color, T.icons[g.kind] ?? g.label));
   parts.push(Text({ key: "l", children: g.label }));
-  if (mode === "svg" && Svg) parts.push(Svg({ key: "g", source: svgGauge(g), alt: T.gaugeAlt(g.label, g.value), width: GAUGE.width, height: GAUGE.height }));
+  if (mode === "svg" && Svg) parts.push(Svg({ key: "g", source: svgGauge(g, grow), alt: T.gaugeAlt(g.label, g.value), width: GAUGE.width + grow, height: GAUGE.height }));
   if (mode === "text") parts.push(textGauge(Box, Text, g));
-  parts.push(Text(g.tone === "alert" ? { key: "v", bold: true, color: TONES.alert.text, children: g.value } : { key: "v", bold: true, children: g.value }));
+  const shows = cfg("limits");
+  const value = shows === "both" || shows === "percent";
+  if (value) parts.push(Text(g.tone === "alert" ? { key: "v", bold: true, color: TONES.alert.text, children: g.value } : { key: "v", bold: true, children: g.value }));
+  if (value && cfg("amount") === "left") parts.push(Text({ key: "a", dimColor: true, children: LEFT[lang] }));
   // Terminal too narrow: the detail goes with the bar, leaving the label and the percentage.
-  if (g.when && mode === "svg") {
+  const time = shows === "both" || shows === "time";
+  if (g.when && time && mode === "svg") {
     parts.push(divider(Text, "s"), icon(Svg, "i", "clock", color, T.icons.reset, SMALL_ICON), Text({ key: "d", dimColor: true, children: g.when }));
   }
-  else if (g.when && mode === "text") parts.push(Text({ key: "d", dimColor: true, children: `· ${g.when}` }));
+  else if (g.when && time && mode === "text") parts.push(Text({ key: "d", dimColor: true, children: `· ${g.when}` }));
   // The 7-day limit running out before the reset: amber, red within a day.
   // Not when the line is too narrow for details: the warning would make it wrap.
   if (g.out && mode !== "none") {
-    const color = g.out.left <= OUT_ALERT ? TONES.alert.text : TONES.fast.text;
+    const color = g.out.left <= num("outAlert") * HOUR && cfg("red") === "on" ? TONES.alert.text : TONES.fast.text;
     parts.push(divider(Text, "o"), Text({ key: "w", bold: true, color, children: T.runOut(dayPartOf(g.out.at)) }));
   }
   // The 5-hour reset time and the 7-day estimate go to the hover card.
-  const tip = g.resetAt
-    ? T.resetsAt(g.resetAt)
-    : g.out
-      ? [T.runOutTip(T.percent(Math.round(g.out.gained)), duration(g.out.over), dayPartOf(g.out.at), clockTime(g.out.at), dateOf(g.out.resetMs)), recentLine(g.out.recent)].filter(Boolean).join("\n")
-      : "";
+  const tip = [
+    // The figures first, the sentences about them after.
+    g.resetAt ? T.resetsAt(g.resetAt) : "",
+    g.elapsed === null ? "" : T.elapsed(T.percent(Math.round(g.elapsed))),
+    g.out ? recentLine(g.out.recent) : "",
+    g.elapsed === null ? "" : T.pace(Math.round(g.used - g.elapsed)),
+    g.out ? T.runOutTip(T.percent(Math.round(g.out.gained)), duration(g.out.over), dayPartOf(g.out.at), clockTime(g.out.at), dateOf(g.out.resetMs)) : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
   return { key: "gauge-" + g.label, tint: TINTS[g.kind] ?? TINTS.spend_limit, parts, tip };
 }
 
@@ -1483,10 +1569,12 @@ function cacheBlock({ Text, Svg }, mode, state) {
   const valueColor = warm
     ? WARM_COLORS[warm.state]
     : state.tone === "alert" ? TONES.alert.text : state.tone === "fast" && (!state.urgent || !state.detail) ? TONES.fast.text : undefined;
-  parts.push(Text(state.tone === "none" ? { key: "v", dimColor: true, children: state.value } : { key: "v", bold: true, ...(valueColor ? { color: valueColor } : {}), children: state.value }));
+  // Bolt only: the app keeps the color and the hover card, the value goes.
+  const boltOnly = mode === "svg" && cfg("cache") === "bolt";
+  if (!boltOnly) parts.push(Text(state.tone === "none" ? { key: "v", dimColor: true, children: state.value } : { key: "v", bold: true, ...(valueColor ? { color: valueColor } : {}), children: state.value }));
   // After the value: the urgent detail in yellow, then the rest dim (the stake, and in the
   // terminal the advice the app keeps for the tooltip).
-  if (mode !== "none") {
+  if (mode !== "none" && !boltOnly) {
     const lead = state.urgent ? state.detail : "";
     const rest = [state.urgent ? "" : state.detail, state.stake, mode === "text" ? state.advice : ""].filter(Boolean).join(" · ");
     if (mode === "svg" && (lead || rest)) parts.push(divider(Text, "s"));
@@ -1520,8 +1608,9 @@ function textGauge(Box, Text, g) {
 
 // Drawn gauge: solid bar up to the share used; the gap with elapsed time is hatched,
 // grey after the bar (margin left) or in the bar's color (ahead of time).
-function svgGauge(g) {
-  const { width, height } = GAUGE;
+function svgGauge(g, grow = 0) {
+  const { height } = GAUGE;
+  const width = GAUGE.width + grow;
   const radius = height / 2;
   const used = (bound(g.used) / 100) * width;
   const time = g.elapsed === null ? used : (g.elapsed / 100) * width;
@@ -1544,13 +1633,16 @@ function svgGauge(g) {
 
 // ---------- Line ----------
 
-function drawLine(elements, surface, columns, now, $) {
+// extra: pixels each growing bar gains while the band fills; null on the first pass, which measures.
+function drawLine(elements, surface, columns, now, $, extra = null) {
   const { Box, Text, Svg, Button } = elements;
   const hide = prefs.hide;
+  const grow = extra ?? 0;
   const desktop = surface === "desktop" && !!Svg;
   // A window that already reset has no valid reading: hidden until the next one.
   const gauges = hide.limits ? [] : limits.list.filter((limit) => !(Date.parse(limit.resetsAt ?? "") <= now)).map((limit) => gaugeOf(limit, now));
-  const cacheNow = hide.cache ? null : cacheState(now);
+  let cacheNow = hide.cache ? null : cacheState(now);
+  if (cacheNow && cfg("red") === "off" && cacheNow.tone === "alert") cacheNow = { ...cacheNow, tone: "fast" };
   // Drawn bars in the app; in the terminal, characters when the line fits, otherwise no bar or detail.
   let mode = "svg";
   if (!desktop) mode = textWidth(gauges, cacheNow) <= columns - RESERVED_COLUMNS ? "text" : "none";
@@ -1563,31 +1655,34 @@ function drawLine(elements, surface, columns, now, $) {
     const icon = desktop
       ? Svg({ key: "icon", source: weatherSvg(f.id), alt: title, width: WEATHER_ICON_SIZE, height: WEATHER_ICON_SIZE })
       : Text({ key: "icon", color: f.color, bold: true, children: f.icon });
-    const parts = [icon, Text({ key: "tokens", bold: true, children: short(cur.tokens) })];
+    const parts = cfg("weather") === "on" ? [icon] : [];
+    parts.push(Text({ key: "tokens", bold: true, children: contextText(cur) }));
     // A single reading draws no trend: the bars wait for the second turn.
-    if (readings.length >= 2) {
+    if (readings.length >= 2 && num("bars") > 0) {
       if (desktop) {
         parts.push(divider(Text, "s"));
-        parts.push(Svg({ key: "spark", source: barsSvg(SPARK_COLORS[f.color] ?? SPARK_COLORS.blue), alt: T.turnsAlt(turnDeltas().length), width: barsWidth(turnDeltas().length), height: SPARK.height }));
+        parts.push(Svg({ key: "spark", source: barsSvg(SPARK_COLORS[f.color] ?? SPARK_COLORS.blue, Math.max(0, grow)), alt: T.turnsAlt(turnDeltas(Math.max(0, grow)).length), width: barsWidth(turnDeltas(Math.max(0, grow)).length), height: SPARK.height }));
       } else {
         parts.push(Box({ key: "spark", flexDirection: "row", children: chartText(Text, f.color) }));
       }
-      const trend = trendWord();
+      const trend = cfg("trend") === "on" ? trendWord() : "";
       if (trend) parts.push(Text({ key: "d", dimColor: true, children: trend }));
     }
-    blocks.push({ key: "context", tint: TINTS.context, parts, tip: title });
+    blocks.push({ key: "context", tint: TINTS.context, parts, tip: contextTip(cur, title) });
   }
-  for (const g of gauges) blocks.push(gaugeBlock(elements, mode, g));
+  for (const g of gauges) blocks.push(gaugeBlock(elements, mode, g, grow));
   if (cacheNow) blocks.push(cacheBlock(elements, mode, cacheNow));
   // The cost goes first when the terminal is short of room.
   if (!hide.cost && cost !== null && cost >= 0.005 && mode !== "none") {
-    const parts = [Text({ key: "v", bold: true, children: T.cost(cost) })];
+    const parts = [Text({ key: "v", bold: true, children: costValue() })];
     const share = lastPromptText();
     if (desktop) {
       // The app keeps the total; the last prompt goes to the card.
       parts.unshift(icon(Svg, "i", "coin", ICON_COLORS.cost, T.icons.cost));
-      const tip = [T.costTips.total(T.cost(cost)), limits.list.length > 0 ? T.costTips.plan : T.costTips.api];
+      // The figures first, the sentence last.
+      const tip = [T.costTips.total(T.cost(cost))];
       if (share) tip.push(T.costTips.last(share));
+      tip.push(limits.list.length > 0 ? T.costTips.plan : T.costTips.api);
       blocks.push({ key: "cost", tint: TINTS.cost, parts, tip: tip.join("\n") });
     } else {
       if (share) parts.push(Text({ key: "d", dimColor: true, children: `(${share})` }));
@@ -1604,7 +1699,27 @@ function drawLine(elements, surface, columns, now, $) {
     blocks.push({ key: "agents", tint: TINTS.agents, parts, tip: desktop ? teamTip(now) : "" });
   }
 
+  const rank = ORDERS[cfg("order")];
+  const place = (b) => rank.indexOf(b.key.startsWith("gauge") ? "limits" : b.key);
+  blocks.sort((a, b) => place(a) - place(b));
+
+  // Filling the bar: every pill grows to share the width, its content centered.
+  const stretch = cfg("stretch") === "on" ? { flexGrow: 1, justifyContent: "center" } : {};
   const row = (b) => ({ key: b.key, flexDirection: "row", columnGap: 1, alignItems: "center", children: b.parts });
+  if (desktop && extra === null) {
+    // The gauges share what the pills leave of the band, or give back what they overrun it by
+    // (down to MIN_GAUGE) so the line does not wrap. The prompt bars only grow, and only when
+    // the band is to be filled. The measure is an estimate: SLACK of the width is kept aside,
+    // and 85% of what is left is handed out.
+    const sparks = readings.length >= 2 && num("bars") > 0 && !hide.context ? 1 : 0;
+    const used = blocks.reduce((sum, b) => sum + 18 + PX_COLUMN * (b.parts.length - 1) + pxOf(b.parts), 0) + 8 * blocks.length;
+    const room = (columns - 2 * RESERVED_COLUMNS) * PX_COLUMN;
+    const spare = room * (1 - SLACK) - used - GEAR_PX;
+    let each = 0;
+    if (spare < 0 && gauges.length > 0) each = Math.max(Math.ceil(spare / gauges.length), MIN_GAUGE - GAUGE.width);
+    else if (spare > 40 && cfg("stretch") === "on" && gauges.length + sparks > 0) each = Math.floor((spare * 0.85) / (gauges.length + sparks));
+    return drawLine(elements, surface, columns, now, $, each);
+  }
   if (desktop) {
     // Pills: tinted, outlined, side by side. The app rounds a Box only through its border, and
     // a border brings a padding that made the band taller than the prompt box: paddingY, set
@@ -1614,33 +1729,97 @@ function drawLine(elements, surface, columns, now, $) {
     const pills = blocks.map((b) =>
       Box({
         ...row(b),
-        children: b.tip ? [...b.parts, hoverCard(Box, Text, b.tip)] : b.parts,
+        ...stretch,
+        children: b.tip && cfg("cards") === "on" ? [...b.parts, hoverCard(Box, Text, b.tip)] : b.parts,
         flexShrink: 0,
         paddingX: 1,
         paddingY: 0,
-        borderStyle: "round",
-        borderColor: b.tint[1],
-        ...(pillFill ? { backgroundColor: b.tint[0] } : {}),
+        ...(cfg("borders") === "on" ? { borderStyle: "round", borderColor: b.tint[1] } : {}),
+        ...(cfg("fill") === "on" ? { backgroundColor: b.tint[0] } : {}),
       }),
     );
-    pills.push(gear(elements, $));
+    // The gear sits at the right edge, out of the flow: a flex item of its own took a gap's
+    // width, enough to wrap the line. The band keeps room for it on the right.
+    pills.push(Box({ key: "gear-box", position: "absolute", top: 0, right: 0, children: [gear(elements, $)] }));
     // A narrow window wraps the pills onto a second line instead of clipping the last ones (#2).
-    return Box({ flexDirection: "row", flexWrap: "wrap", alignItems: "center", columnGap: 1, rowGap: 1, paddingX: 1, children: pills });
+    return Box({ flexDirection: "row", flexWrap: "wrap", alignItems: "center", columnGap: 1, rowGap: 1, paddingLeft: 1, paddingRight: GEAR_COLUMNS, children: pills });
   }
   const children = [];
   blocks.forEach((b, i) => {
     if (i > 0) children.push(Box({ key: "sep-" + i, paddingX: 1, children: [Text({ dimColor: true, children: SEP })] }));
-    children.push(Box(row(b)));
+    children.push(Box({ ...row(b), ...stretch }));
   });
+  if (!stretch.flexGrow) children.push(Box({ key: "spacer", flexGrow: 1 }));
   children.push(Box({ key: "gear-box", paddingX: 1, children: [gear(elements, $)] }));
   return Box({ flexDirection: "row", alignItems: "center", paddingX: 1, children });
 }
 
-// The gear at the end of the band: hovering it shows the settings, pressing it opens them in a pane.
-function gear({ Box, Text, Button }, $) {
-  const nextLanguage = LANGUAGES[(LANGUAGES.indexOf(prefs.language || "auto") + 1) % LANGUAGES.length];
-  const item = (key, label, value, edit) =>
-    Box({ key, flexDirection: "row", columnGap: 1, children: [Text({ key: "l", children: label }), Button({ key: "b", label: value, onPress: () => change($, edit) })] });
+// Pixels a drawn element takes, roughly: its text, its drawings and its padding.
+function pxOf(node) {
+  if (node == null || node === false) return 0;
+  if (typeof node === "string" || typeof node === "number") return String(node).length * PX_COLUMN;
+  if (Array.isArray(node)) return node.reduce((sum, n) => sum + pxOf(n), 0);
+  const props = node.props ?? node;
+  if (typeof props.width === "number" && props.source) return props.width;
+  return pxOf(node.children ?? props.children) + 2 * PX_COLUMN * (props.paddingX ?? 0);
+}
+
+// The context pill's card: the weather, the exact tokens, the room left and what the recent
+// prompts say about how long it lasts.
+function contextTip(cur, title) {
+  const deltas = turnDeltas();
+  const room = Math.max(0, cur.window - cur.tokens);
+  const lines = [title, T.tokensOf(cur.tokens.toLocaleString("en-US"), cur.window.toLocaleString("en-US")), T.roomLeft(short(room))];
+  const average = deltas.reduce((sum, d) => sum + d, 0) / Math.max(1, deltas.length);
+  if (deltas.length > 0) lines.push(T.recentPrompts(deltas.map((d) => `+${short(d)}`).join(", ")));
+  // The sentence goes last, under the figures.
+  if (average > 0) lines.push(T.promptsLeft(Math.floor(room / average)));
+  return lines.join("\n");
+}
+
+// The context pill's value: the tokens, the share of the window, or both.
+function contextText(cur) {
+  const mode = cfg("context");
+  if (mode === "percent") return T.percent(cur.percent);
+  return mode === "both" ? `${short(cur.tokens)} · ${T.percent(cur.percent)}` : short(cur.tokens);
+}
+
+// The gear at the end of the band: hovering it shows the settings.
+function gear({ Box, Text, Button, Svg }, $) {
+  // A label on the left, its button on the right.
+  const item = (key, label, value, edit, dim) =>
+    Box({
+      key,
+      flexDirection: "row",
+      justifyContent: "space-between",
+      columnGap: 2,
+      children: [Text({ key: "l", children: label }), Button({ key: "b", label: value, dimColor: dim, onPress: () => change($, edit) })],
+    });
+  // A choice cycles to the next value on a press.
+  const choice = ([, key, label, choices]) => {
+    const at = Math.max(0, choices.findIndex(([value]) => value === cfg(key)));
+    return item(key, label, choices[at][1], () => (prefs.v[key] = choices[(at + 1) % choices.length][0]));
+  };
+  const tabs = Box({
+    key: "tabs",
+    flexDirection: "row",
+    columnGap: 1,
+    children: TABS.map(([id, name]) => Button({ key: "tab-" + id, label: id === tab ? `[${name}]` : name, dimColor: id !== tab, onPress: () => { tab = id; $.ui.invalidate("ui.render"); } })),
+  });
+  const rows = SETTINGS.filter(([where]) => where === tab).map(choice);
+  if (tab === "caffeine") {
+    if (!caffeine) rows.push(Text({ key: "none", dimColor: true, children: "Cache warming is not running." }));
+    else {
+      rows.push(item("on", "Cache warming", caffeine.on ? "● on" : "○ off", () => caffeinate($, "on", caffeine.on ? "off" : "on"), !caffeine.on));
+      for (const [key, label, choices] of CAFFEINE) {
+        const at = Math.max(0, choices.findIndex(([value]) => value === caffeine[key]));
+        rows.push(item(key, label, at === 0 && choices.every(([value]) => value !== caffeine[key]) ? caffeine[key] : choices[at][1], () => caffeinate($, key, choices[(at + 1) % choices.length][0])));
+      }
+      rows.push(item("poke", "Poke", "now", () => caffeinate($, "poke", "now")));
+    }
+  }
+  if (tab === "show") PILLS.forEach((pill) => rows.push(item(pill, PILL_NAMES[pill], prefs.hide[pill] ? "○ hidden" : "● shown", () => (prefs.hide[pill] = !prefs.hide[pill]), !!prefs.hide[pill])));
+  if (tab === "look") rows.push(item("reset", "Settings", "reset to defaults", () => (prefs = { v: {}, hide: {} })));
   const card = Box({
     position: "absolute",
     bottom: 1,
@@ -1648,17 +1827,15 @@ function gear({ Box, Text, Button }, $) {
     display: "none",
     hover: { display: "flex" },
     flexDirection: "column",
+    minWidth: 34,
     paddingX: 1,
     borderStyle: "round",
     borderColor: CARD.line,
     backgroundColor: CARD.back,
-    children: [
-      item("language", "Language", prefs.language || "auto", () => (prefs.language = nextLanguage === "auto" ? "" : nextLanguage)),
-      ...PILLS.map((pill) => item(pill, pill, prefs.hide[pill] ? "hidden" : "shown", () => (prefs.hide[pill] = !prefs.hide[pill]))),
-    ],
+    children: [Text({ key: "title", bold: true, children: "Token Weather" }), tabs, Box({ key: "gap", height: 1 }), ...rows],
   });
-  const open = () => $.ui.open({ id: SETTINGS_PANE, title: "Token Weather settings", focus: true, closeOnEscape: true });
-  return Box({ key: "gear", children: [Button({ key: "open", label: "⚙", plain: true, dimColor: true, onPress: open }), card] });
+  const glyph = Svg ? icon(Svg, "open", "gear", ICON_COLORS.gear, "Settings") : Text({ key: "open", dimColor: true, children: "⚙" });
+  return Box({ key: "gear", children: [glyph, card] });
 }
 
 // Width of the terminal line in characters, with the bars and details.
@@ -1667,8 +1844,8 @@ function textWidth(gauges, cacheNow) {
   let blocks = 0;
   if (readings.length > 0 && !prefs.hide.context) {
     const cur = readings[readings.length - 1];
-    width += 2 + short(cur.tokens).length;
-    if (readings.length >= 2) width += 1 + turnDeltas().length + 1 + trendWord().length;
+    width += (cfg("weather") === "on" ? 2 : 0) + contextText(cur).length;
+    if (readings.length >= 2 && num("bars") > 0) width += 1 + turnDeltas().length + 1 + (cfg("trend") === "on" ? trendWord().length : 0);
     blocks++;
   }
   for (const g of gauges) width += g.label.length + 1 + TEXT_CELLS + 1 + g.value.length + (g.when ? 3 + g.when.length : 0) + (g.out ? 3 + T.runOut(dayPartOf(g.out.at)).length : 0);
@@ -1679,7 +1856,7 @@ function textWidth(gauges, cacheNow) {
   }
   if (!prefs.hide.cost && cost !== null && cost >= 0.005) {
     const share = lastPromptText();
-    width += T.cost(cost).length + (share ? 3 + share.length : 0);
+    width += costValue().length + (share ? 3 + share.length : 0);
     blocks++;
   }
   if (!prefs.hide.agents && teamSize() > 0) {
@@ -1689,9 +1866,20 @@ function textWidth(gauges, cacheNow) {
   return width + 3 * Math.max(0, blocks - 1) + 2;
 }
 
+// The cost pill's value: the session total, or the last prompt (in dollars, or in points of the
+// 5-hour limit) once there is one.
+function costValue() {
+  const mode = cfg("cost");
+  if (mode === "last" && lastPrompt !== null && lastPrompt >= 0.005) return T.lastPrompt(lastPrompt);
+  if (mode === "points" && lastPrompt5h !== null && lastPrompt5h >= 0.1) return T.lastPrompt5h(lastPrompt5h);
+  return T.cost(cost);
+}
+
 // The agents pill: "2 running · 7" while some run; otherwise "7" in the app, "7 agents" in the terminal.
 function agentsText(n, desktop) {
-  if (agents.length > 0) return T.agentsRunning(agents.length, n);
+  const mode = cfg("agents");
+  if (mode === "running") return String(agents.length);
+  if (agents.length > 0 && mode === "auto") return T.agentsRunning(agents.length, n);
   return desktop ? String(n) : T.agents(n);
 }
 
@@ -1733,19 +1921,22 @@ function forecastFor(percent) {
   return FORECAST.find((band) => percent < band.upTo) ?? FORECAST[FORECAST.length - 1];
 }
 
-// Tokens added by each recent prompt (at most TURN_BARS), oldest first.
+// Tokens added by each recent prompt (at most the prompt-bars setting), oldest first.
 // A compaction lowers the context: that prompt counts as 0.
-function turnDeltas() {
+// grow: pixels the band gives the bars to fill; each takes room for one more.
+function turnDeltas(grow = 0) {
   const deltas = [];
   for (let i = 1; i < readings.length; i++) deltas.push(Math.max(0, readings[i].tokens - readings[i - 1].tokens));
-  return deltas.slice(-TURN_BARS);
+  return deltas.slice(-(num("bars") + Math.floor(grow / (SPARK.bar + SPARK.gap))));
 }
 
 // Height relative to the heaviest prompt shown: the prompt that cost the most fills the height.
-function barLevels() {
-  const deltas = turnDeltas();
+function barLevels(grow = 0) {
+  const deltas = turnDeltas(grow);
   const top = Math.max(...deltas, 1);
-  return deltas.map((d) => d / top);
+  // Log keeps a small prompt visible beside a big one.
+  const level = cfg("scale") === "log" ? (d) => Math.log1p(d) / Math.log1p(top) : (d) => d / top;
+  return deltas.map(level);
 }
 
 // Terminal: one character per prompt, earlier ones grey, the current one in the weather's tint.
@@ -1764,9 +1955,10 @@ function barsWidth(n) {
 }
 
 // App: rounded bars, the most recent in color; a prompt at 0 keeps a line on the floor.
-function barsSvg(color) {
-  const { height, bar, gap } = SPARK;
-  const levels = barLevels();
+function barsSvg(color, grow = 0) {
+  const { height, gap } = SPARK;
+  const levels = barLevels(grow);
+  const bar = SPARK.bar;
   const width = barsWidth(levels.length);
   const x0 = 0;
   const rects = levels.map((level, i) => {
@@ -1787,6 +1979,7 @@ function trendWord() {
 
 // 1M, 1.2M, 107k, 98.3k, 950: one decimal only when it matters.
 function short(n) {
+  if (cfg("numbers") === "full") return n.toLocaleString("en-US");
   if (n >= 1_000_000) return `${+(n / 1_000_000).toFixed(1)}M`;
   if (n >= 100_000) return `${Math.round(n / 1_000)}k`;
   if (n >= 1_000) return `${+(n / 1_000).toFixed(1)}k`;

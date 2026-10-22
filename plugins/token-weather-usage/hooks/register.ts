@@ -1,5 +1,5 @@
 // One module per plugin: token-weather-usage.mjs draws the band and hooks the events cache-warm.ts
-// shares; warming() registers the rest of the cache warming (the /caffeine command and its prompts).
+// shares; warming() registers the rest of the cache warming (the /warm command and its prompts).
 import type { Register } from 'claude-code'
 
 import { warming } from './cache-warm'

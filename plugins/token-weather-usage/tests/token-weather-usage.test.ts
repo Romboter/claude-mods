@@ -93,7 +93,7 @@ for (const surface of ["terminal", "desktop"] as const) {
       // The weather word sits in the context pill's hover card; no drawing is interactive any more
       // (the app shows no SVG tooltip).
       expect(svgs.some((s) => s.props?.alt === "Clear · 11% of 1M")).toBe(true);
-      expect(await cardOf(ui, "context")).toBe("Clear · 11% of 1M");
+      expect(await cardOf(ui, "context")).toBe("Clear · 11% of 1M\n107,000 of 1,000,000 tokens\n893k left in the window");
       for (const s of svgs) expect(s.props?.isInteractive).toBeFalsy();
       // No request yet: no card on the cache pill.
       expect(await cardOf(ui, "cache")).toBeNull();
@@ -141,12 +141,12 @@ test("keeps what later mods draw under the line", async ($, on) => {
 });
 
 test("settings: the gear ends the band and a hidden pill goes", async ($, on) => {
-  world(on, {}, { settings: { language: "", hide: { context: true } } });
+  world(on, {}, { settings: { v: {}, hide: { context: true } } });
   withUsage(on, LIMITS);
   await $.session.start({ source: "startup", cwd: "/tmp" } as any);
   const { ui, texts } = await band($, "terminal");
   expect(texts).not.toContain("107k");
-  expect(await ui.findAll({ type: "Button" })).toHaveLength(7);
+  expect(await ui.findAll({ type: "Button" })).toHaveLength(11);
 });
 
 test("auto: French when LANG is French", async ($, on) => {
@@ -219,8 +219,8 @@ for (const surface of ["terminal", "desktop"] as const) {
     if (surface === "terminal") {
       expect(texts).toContain("☀");
       // Earlier prompts in grey (+20k then +80k, the heaviest), current prompt (+10k) in color.
-      expect(texts).toContain("▃█");
-      const now: any = await ui.find({ type: "Text", text: "▂" });
+      expect(texts).toContain("▇█");
+      const now: any = ((await ui.findAll({ type: "Text" })) as any[]).find((t) => t.text === "▇");
       expect(now?.props?.color).toBe("yellow");
     } else {
       const svgs = (await ui.findAll({ type: "Svg" })) as any[];
@@ -495,7 +495,7 @@ test("cost: the last prompt's share, next to the total in the terminal, in the c
   expect(desktop.texts).toContain("≈ $4.84");
   expect(desktop.texts).not.toContain("+$0.84");
   expect(await cardOf(desktop.ui, "cost")).toBe(
-    "Thread cost ≈ $4.84\nAt API prices: a subscription is not billed per token, this counts toward its limits.\nLast prompt: +$0.84",
+    "Thread cost ≈ $4.84\nLast prompt: +$0.84\nAt API prices: a subscription is not billed per token, this counts toward its limits.",
   );
 });
 
@@ -661,7 +661,7 @@ test("desktop: pills never shrink, and the 5-hour reset time sits in the pill's 
   const { ui } = await band($, "desktop");
   const pills = ((await ui.findAll({ type: "Box" })) as any[]).filter((b) => b.props?.backgroundColor && b.props?.position !== "absolute");
   for (const p of pills) expect(p.props?.flexShrink).toBe(0);
-  expect(await cardOf(ui, "gauge-5h")).toBe(`Resets at ${at(NOW + 3 * 3_600_000)}`);
+  expect(await cardOf(ui, "gauge-5h")).toBe(`Resets at ${at(NOW + 3 * 3_600_000)}\n40% of the window has passed\n8% behind the clock`);
 });
 
 // ---------- Compaction ----------
@@ -766,12 +766,12 @@ test("cache tooltip, warm, French: lifetime observed, costs, savings", async ($,
   expect(texts.join(" ")).not.toContain("$");
   expect(await boltTip(ui)).toBe(
     [
-      `Cache chaud jusqu'à ${at(NOW + 6 * 60_000 + 3_600_000)} (durée 1 h constatée).`,
       // 287k read out of a 289.3k prompt.
       "Dernier message : 99 % lu depuis le cache (287k).",
       `Relire le contexte : ≈ ${fr$(readCost(289_000))} par message. S'il expire : ≈ ${fr$(rewriteCost(289_000))} pour le réécrire.`,
       // Two hits of 287k each, at the input price minus the cache-read price.
       `Ce fil : ≈ ${fr$(2 * savedBy(287_000))} économisés grâce au cache.`,
+      `Cache chaud jusqu'à ${at(NOW + 6 * 60_000 + 3_600_000)} (durée 1 h constatée).`,
     ].join("\n"),
   );
 });
@@ -785,10 +785,10 @@ test("cache tooltip, warm, English: lifetime assumed", async ($, on) => {
   await step($, BIG_HIT);
   expect(await boltTip((await band($, "desktop")).ui)).toBe(
     [
-      `Cache warm until ${at(NOW + 3_600_000)} (1-hour lifetime, assumed).`,
       "Last message: 99% read from the cache (287k).",
       `Reading the context: ≈ ${en$(readCost(289_000))} a message. If it expires: ≈ ${en$(rewriteCost(289_000))} to write it again.`,
       `This thread: ≈ ${en$(2 * savedBy(287_000))} saved by the cache.`,
+      `Cache warm until ${at(NOW + 3_600_000)} (1-hour lifetime, assumed).`,
     ].join("\n"),
   );
 });
@@ -1318,4 +1318,59 @@ test("agents: an agent with an unpriced request keeps its known cost out of the 
   await ($ as any).turn.complete({ answer: "ok", agentId: "h1" } as any);
   const known = (2_000 * PRICE["claude-haiku-5-5"].input + 70_000 * PRICE["claude-haiku-5-5"].read + 6_000 * 1.25 * PRICE["claude-haiku-5-5"].input + 20_000 * 5 * PRICE["claude-haiku-5-5"].input) / 1e6;
   expect(await agentsCard($)).toContain(`Opus 5.5 · main thread: ≈ ${en$(10 - known)}`);
+});
+
+test("settings: the context pill can show the share of the window", async ($, on) => {
+  world(on, {}, { settings: { v: { context: "both" }, hide: {} } });
+  withUsage(on, LIMITS);
+  await $.session.start({ source: "startup", cwd: "/tmp" } as any);
+  const { texts } = await band($, "terminal");
+  expect(texts).toContain("107k · 11%");
+});
+
+test("settings: limits as the share left, the reset as a clock time, no weather icon", async ($, on) => {
+  world(on, {}, { settings: { v: { amount: "left", resets: "clock", weather: "off", trend: "off", bars: "0" }, hide: {} } });
+  withUsage(on, LIMITS);
+  await $.session.start({ source: "startup", cwd: "/tmp" } as any);
+  const { texts } = await band($, "terminal");
+  expect(texts).toContain("68%");
+  expect(texts).toContain("left");
+  expect(texts.join(" ")).toContain(at(NOW + 3 * 3_600_000));
+  expect(texts.join(" ")).not.toContain("☀");
+});
+
+test("settings: numbers in full", async ($, on) => {
+  world(on, {}, { settings: { v: { numbers: "full" }, hide: {} } });
+  withUsage(on, LIMITS);
+  await $.session.start({ source: "startup", cwd: "/tmp" } as any);
+  const { texts } = await band($, "terminal");
+  expect(texts).toContain("107,000");
+});
+
+async function svgWidths($: any, on: any, stretch: string, columns = 159) {
+  world(on, {}, { settings: { v: { stretch }, hide: {} } });
+  withUsage(on, LIMITS);
+  await $.session.start({ source: "startup", cwd: "/tmp" } as any);
+  const { ui } = await band($, "desktop", columns);
+  return ((await ui.findAll({ type: "Svg" })) as any[]).map((s) => s.props?.width ?? s.width).filter((w) => w > 20);
+}
+
+test("settings: the gauge keeps its width when the bar is not filled", async ($, on) => {
+  expect(Math.max(...(await svgWidths($, on, "off")))).toBe(54);
+});
+
+test("settings: filling the bar widens the gauge", async ($, on) => {
+  expect(Math.max(...(await svgWidths($, on, "on")))).toBeGreaterThan(54);
+});
+
+test("settings: the reset as a clock time and a countdown", async ($, on) => {
+  world(on, {}, { settings: { v: { resets: "both" }, hide: {} } });
+  withUsage(on, LIMITS);
+  await $.session.start({ source: "startup", cwd: "/tmp" } as any);
+  const { texts } = await band($, "terminal");
+  expect(texts).toContain(`· ${at(NOW + 3 * 3_600_000)} · 3h00`);
+});
+
+test("a narrow band shrinks the gauges instead of wrapping", async ($, on) => {
+  expect(Math.max(...(await svgWidths($, on, "off", 70)))).toBeLessThan(54);
 });

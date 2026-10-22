@@ -1,8 +1,8 @@
 // Cache warming for Token Weather Usage: a short poke before the prompt cache expires, and an
-// optional wake after the usage limit resets. Off until /caffeine turns it on, per session.
+// optional wake after the usage limit resets. Off until /warm turns it on, per session.
 // Ported from cache-caffeine by Luis Perez Morales (MIT, https://github.com/lperezmo/cache-caffeine)
 // with its row above the prompt removed: the state shows in the cache pill (see warmState) and
-// everything is driven by /caffeine. brew.ts and wake.ts are unchanged copies.
+// everything is driven by /warm. brew.ts and wake.ts are unchanged copies.
 
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
@@ -103,16 +103,16 @@ type Caffeine = Brew & {
 }
 
 const MINUTE = 60_000
-// `/caffeine warm` alone
+// `/warm warm` alone
 const WARM = 60 * MINUTE
 
 // env and settings first (Claude Code reads them before picking by plan, so a cost that
 // contradicts them is a misread), then a 1h-priced request, then timing, then the plan
 const ttlOf = (c: Caffeine) => c.ttl ?? c.envTtl ?? c.measuredTtl ?? c.timedTtl ?? ttlByPlan(c.limits)
 
-// Where the TTL comes from, for /caffeine status.
+// Where the TTL comes from, for /warm status.
 function ttlSource(c: Caffeine): string {
-  if (c.ttl !== null) return 'set with /caffeine ttl'
+  if (c.ttl !== null) return 'set with /warm ttl'
   if (c.envTtl !== null) return 'from the environment'
   if (c.measuredTtl !== null) return 'measured from what requests cost'
   if (c.timedTtl !== null) return 'measured from request timing'
@@ -124,8 +124,8 @@ const ttlLabel = (ms: number) => (ms >= TTL_1H ? '1h' : '5m')
 
 // Says how it went: a toast, and a line in the transcript that outlasts it.
 function tell($: EngineInterface, text: string): void {
-  $.ui.toast(`caffeine: ${text}`)
-  $.ui.log(`caffeine: ${text}`)
+  $.ui.toast(`warming: ${text}`)
+  $.ui.log(`warming: ${text}`)
 }
 
 async function setting<T>($: EngineInterface, key: string, fallback: T): Promise<T> {
@@ -175,10 +175,10 @@ function howLong(c: Caffeine, now: number): string {
   return c.isForever || c.armed ? 'until you turn it off' : `until you turn it off (or ${span(c.idle).replace(' 00m', '')} idle)`
 }
 
-// One line for /caffeine status.
+// One line for /warm status.
 function describe(c: Caffeine, now: number): string {
   if (!c.isOn) {
-    return 'caffeine off'
+    return 'warming off'
   }
   const tail = [c.pokes ? `${c.pokes} poke${c.pokes === 1 ? '' : 's'}` : '', howLong(c, now)]
     .filter(Boolean)
@@ -186,20 +186,20 @@ function describe(c: Caffeine, now: number): string {
     .join('')
   const over = overLine(c.limits)
   if (over) {
-    return `caffeine paused · ${over.label} limit ${over.percent}%${tail}`
+    return `warming paused · ${over.label} limit ${over.percent}%${tail}`
   }
   if (c.lastAt === 0) {
     const why = c.heldBy ? `waits for your next message after the ${c.heldBy}` : 'waits for the first reply'
-    return `caffeine on · ${why}${tail}`
+    return `warming on · ${why}${tail}`
   }
   if (c.isBusy || c.poke !== 'none') {
-    return `caffeine on · cache warm${tail}`
+    return `warming on · cache warm${tail}`
   }
   if (now - c.lastAt >= ttlOf(c)) {
-    return `caffeine on · cache went cold, waits for your next turn${tail}`
+    return `warming on · cache went cold, waits for your next turn${tail}`
   }
   const at = nextPokeAt(c.lastAt, everyOf(c))!
-  return `caffeine on · poke at ${clock(at, now)} (in ${span(at - now)})${tail}`
+  return `warming on · poke at ${clock(at, now)} (in ${span(at - now)})${tail}`
 }
 
 // What the cache pill shows: the state recolors its bolt, the lines join its hover card.
@@ -208,7 +208,7 @@ type Warm = { state: 'warm' | 'poking' | 'paused' | 'cold' | 'waiting' | 'wake';
 
 function warmState(c: Caffeine, now: number): Warm | null {
   if (!c.isOn && !c.armed) return null
-  const lines = [describe(c, now).replace(/^caffeine /, 'Caffeine ')]
+  const lines = [describe(c, now).replace(/^warming /, 'Warming ')]
   if (c.lastWarm !== null) lines.push(`The last poke found the cache ${c.lastWarm ? 'warm' : 'cold'}.`)
   if (c.armed) lines.push(`Wake: Claude continues at ${clock(c.armed.at, now)} (in ${span(c.armed.at - now)}).`)
   let state: Warm['state']
@@ -325,7 +325,7 @@ function costLines(c: Caffeine): string[] {
     `Context ${sized(c.context)} tokens on ${model}, ${ttlLabel(ttl)} cache, a poke ${span(everyOf(c))} after the last request.`,
     `One poke: ${sized(each)} input-token equivalents${usd(each)}${c.lastPoke ? ' (the last one, measured)' : ` (cache read at ${readRate(model)}x)`}.`,
     `One cache rewrite: ${sized(rewrite)} (written again at ${writeRate(ttl)}x)${usd(rewrite)}.`,
-    `A rewrite costs about ${Math.round(ratio)} pokes: caffeine pays off if you are back within ${span(ratio * everyOf(c))}.`,
+    `A rewrite costs about ${Math.round(ratio)} pokes: warming pays off if you are back within ${span(ratio * everyOf(c))}.`,
     c.pokes ? `This session: ${c.pokes} poke${c.pokes === 1 ? '' : 's'}, ${sized(c.spent)}${usd(c.spent)}.` : '',
     'At API list prices; on a Pro or Max plan the same tokens count against your usage limits instead.',
   ].filter(Boolean)
@@ -409,13 +409,13 @@ async function adopt($: EngineInterface, c: Caffeine): Promise<void> {
 async function armAtReset($: EngineInterface, c: Caffeine): Promise<void> {
   const block = blocking(c.limits)
   if (!block) {
-    tell($, 'no reset time yet: it comes with the first reply on a Pro or Max plan. /caffeine wake 14:30 picks a time.')
+    tell($, 'no reset time yet: it comes with the first reply on a Pro or Max plan. /warm wake 14:30 picks a time.')
     return
   }
   await arm($, c, wakeAfter(block.resetsAt), block.label)
 }
 
-const NO_RESET = 'No reset time yet: it comes with the first reply on a Pro or Max plan. /caffeine wake 14:30 picks a time.'
+const NO_RESET = 'No reset time yet: it comes with the first reply on a Pro or Max plan. /warm wake 14:30 picks a time.'
 
 async function wakeCommand($: EngineInterface, c: Caffeine, args: string): Promise<{ text: string }> {
   const [word = '', ...rest] = args.split(/\s+/)
@@ -477,14 +477,14 @@ async function forever($: EngineInterface, c: Caffeine, isSure: boolean): Promis
     let answer: string
     try {
       answer = await $.ui.ask(
-        `Keep the cache warm with no end this time? Caffeine pokes ${span(everyOf(c))} after the last request until you turn it off: about ${perDay} pokes a day while you are away, each using your plan's usage. Turning it off brings the idle stop back.`,
-        { header: 'caffeine', options: [FOREVER, KEEP_STOP] },
+        `Keep the cache warm with no end this time? Warming pokes ${span(everyOf(c))} after the last request until you turn it off: about ${perDay} pokes a day while you are away, each using your plan's usage. Turning it off brings the idle stop back.`,
+        { header: 'warm', options: [FOREVER, KEEP_STOP] },
       )
     } catch {
-      return { text: 'No one to ask here. /caffeine forever yes confirms it.' }
+      return { text: 'No one to ask here. /warm forever yes confirms it.' }
     }
     if (answer !== FOREVER) {
-      return { text: `Kept: caffeine still turns itself off after ${span(c.idle)} without a turn of your own.` }
+      return { text: `Kept: warming still turns itself off after ${span(c.idle)} without a turn of your own.` }
     }
   }
   if (!c.isOn || c.until) {
@@ -493,28 +493,28 @@ async function forever($: EngineInterface, c: Caffeine, isSure: boolean): Promis
   c.isForever = true
   await keep($, c)
   await refresh($, c)
-  return { text: `Caffeine on with no end, until you turn it off. Next time you turn it on, the ${span(c.idle)} idle stop is back.` }
+  return { text: `Warming on with no end, until you turn it off. Next time you turn it on, the ${span(c.idle)} idle stop is back.` }
 }
 
 const help = [
-  '/caffeine              turn it on or off for this session',
-  '/caffeine on | off',
-  '/caffeine warm 1h      keep the cache warm for 1h, then off (90m, 1h30m; alone: 1h)',
-  '/caffeine until 18:00  on, and off again at 18:00 (6pm)',
-  '/caffeine poke         poke now',
-  '/caffeine message …    what the poke says (alone: show it; "reset": the default)',
-  '/caffeine auto 100k    turn on by itself once the context passes 100k tokens (off: never)',
-  '/caffeine cost         what the pokes cost against one cache rewrite',
-  '/caffeine every 10m    poke this long after the last request (alone: back to auto)',
-  '/caffeine ttl 1h|5m    pin the cache TTL (auto: back to detecting it)',
-  '/caffeine forever      on with no end this time, once confirmed (also: idle off); off restores the idle stop',
-  '/caffeine idle 8h      turn off after this long without a turn of your own',
-  '/caffeine wake         wake Claude just after the usage limit resets',
-  '/caffeine 1 min        wake Claude at a time: in 20 minutes, 2 hours, 14:30, 3pm (also: wake 1 min); wake off cancels',
-  '/caffeine 20 min check the build   a wake that tells Claude exactly that',
-  '/caffeine wake prompt …  what Claude is told on every wake; wake prompt default goes back',
-  '/caffeine wake auto     book the wake by itself whenever the limit hits (on/off)',
-  '/caffeine status       what it is doing',
+  '/warm              turn it on or off for this session',
+  '/warm on | off',
+  '/warm warm 1h      keep the cache warm for 1h, then off (90m, 1h30m; alone: 1h)',
+  '/warm until 18:00  on, and off again at 18:00 (6pm)',
+  '/warm poke         poke now',
+  '/warm message …    what the poke says (alone: show it; "reset": the default)',
+  '/warm auto 100k    turn on by itself once the context passes 100k tokens (off: never)',
+  '/warm cost         what the pokes cost against one cache rewrite',
+  '/warm every 10m    poke this long after the last request (alone: back to auto)',
+  '/warm ttl 1h|5m    pin the cache TTL (auto: back to detecting it)',
+  '/warm forever      on with no end this time, once confirmed (also: idle off); off restores the idle stop',
+  '/warm idle 8h      turn off after this long without a turn of your own',
+  '/warm wake         wake Claude just after the usage limit resets',
+  '/warm 1 min        wake Claude at a time: in 20 minutes, 2 hours, 14:30, 3pm (also: wake 1 min); wake off cancels',
+  '/warm 20 min check the build   a wake that tells Claude exactly that',
+  '/warm wake prompt …  what Claude is told on every wake; wake prompt default goes back',
+  '/warm wake auto     book the wake by itself whenever the limit hits (on/off)',
+  '/warm status       what it is doing',
 ].join('\n')
 
 async function hold($: EngineInterface, c: Caffeine, by: string): Promise<void> {
@@ -563,7 +563,7 @@ const c: Caffeine = {
 
 export async function warmStart($: EngineInterface): Promise<void> {
   await $.command.register({
-    name: 'caffeine',
+    name: 'warm',
     description: 'Keep the prompt cache warm while you step away, and wake Claude when the usage limit resets',
     argumentHint: '[on|off|status|warm|until|wake|ttl|every|idle|auto|cost|poke|message|forever|help]',
   })
@@ -595,13 +595,13 @@ export async function warmMeasure($: EngineInterface, e: { rateLimits: readonly 
   c.context = e.context?.tokens ?? c.context
   if (c.autoAt && !c.isOn && !c.isAutoDeclined && c.context >= c.autoAt) {
     await switchOn($, c, true)
-    tell($, `on: the context passed ${sized(c.autoAt)} tokens. /caffeine off turns it off for this session.`)
+    tell($, `on: the context passed ${sized(c.autoAt)} tokens. /warm off turns it off for this session.`)
   }
   const block = blocking(c.limits)
   if (block && block.percent >= 100 && !c.armed && (await setting($, 'caffeine.wakeAuto', false))) {
     await armAtReset($, c)
   } else if (!wasNear && isNear(c.limits) && block) {
-    $.ui.toast(`caffeine: ${block.label} limit at ${block.percent}%, resets ${clock(block.resetsAt, await $.clock.now())}. /caffeine wake books a wake.`)
+    $.ui.toast(`warming: ${block.label} limit at ${block.percent}%, resets ${clock(block.resetsAt, await $.clock.now())}. /warm wake books a wake.`)
   }
   $.ui.invalidate('ui.render')
 }
@@ -669,7 +669,7 @@ export async function warmComplete($: EngineInterface, e: { agentId?: string; tu
         await switchOn($, c, false)
         tell(
           $,
-          `turned off: its poke found the cache cold (rewrote ${sized(e.usage.cache_creation_input_tokens)} tokens), so pokes were not keeping it warm. /caffeine status may say why; turn it on again to retry.`,
+          `turned off: its poke found the cache cold (rewrote ${sized(e.usage.cache_creation_input_tokens)} tokens), so pokes were not keeping it warm. /warm status may say why; turn it on again to retry.`,
         )
       } else if (e.usage && !isExempt) {
         c.lastWarm = true
@@ -689,6 +689,46 @@ export async function warmCompact($: EngineInterface, e: { agentId?: string; tri
 export async function warmEnd($: EngineInterface, e: { reason?: string }): Promise<void> {
   if (e.reason === 'clear') await hold($, c, '/clear')
   else if (c.session) await $.store.delete(`warm:${c.session}`).catch(() => undefined)
+}
+
+// What the gear's Caffeine tab shows: the settings /warm keeps, as plain values.
+export async function warmView($: EngineInterface) {
+  return {
+    on: c.isOn,
+    auto: String(c.autoAt),
+    ttl: c.ttl === null ? 'auto' : ttlLabel(c.ttl),
+    idle: String(c.idle),
+    wakeAuto: (await setting($, 'caffeine.wakeAuto', false)) ? 'on' : 'off',
+  }
+}
+
+// The gear's Caffeine tab pressing a setting: the same changes as /warm on|off|auto|ttl|idle|wake auto|poke.
+export async function warmSet($: EngineInterface, key: string, value: string): Promise<void> {
+  switch (key) {
+    case 'on':
+      if (value === 'off') c.isAutoDeclined = true
+      await switchOn($, c, value === 'on')
+      return
+    case 'auto':
+      c.autoAt = Number(value)
+      await $.store.set('caffeine.autoAt', c.autoAt)
+      break
+    case 'ttl':
+      c.ttl = value === '1h' ? TTL_1H : value === '5m' ? TTL_5M : null
+      await $.store.set('caffeine.ttl', c.ttl)
+      break
+    case 'idle':
+      c.idle = Number(value)
+      await $.store.set('caffeine.idle', c.idle)
+      break
+    case 'wakeAuto':
+      await $.store.set('caffeine.wakeAuto', value === 'on')
+      return
+    case 'poke':
+      if (c.poke === 'none') poke($, c, await $.clock.now())
+      return
+  }
+  await refresh($, c)
 }
 
 // Registers the events token-weather-usage.mjs does not hook; it calls the warm* functions for the rest.
@@ -732,7 +772,7 @@ export function warming(on: Parameters<Register>[0]): void {
 
   // A compaction or /clear empties the cache: no pokes until the person's next
   // request (or the turn carrying on) writes it again.
-  on('command.run', { command: 'caffeine' }, async ($, e) => {
+  on('command.run', { command: 'warm' }, async ($, e) => {
     const args = e.args.trim()
     const [word = '', ...rest] = args.split(/\s+/)
     const arg = word.toLowerCase()
@@ -744,26 +784,26 @@ export function warming(on: Parameters<Register>[0]): void {
       case '':
         if (c.isOn) c.isAutoDeclined = true
         await switchOn($, c, !c.isOn)
-        return { text: c.isOn ? `Caffeine on: ${describe(c, now).replace(/^caffeine on · /, '')}.` : 'Caffeine off.' }
+        return { text: c.isOn ? `Warming on: ${describe(c, now).replace(/^warming on · /, '')}.` : 'Warming off.' }
       case 'on':
         await switchOn($, c, true)
-        return { text: `Caffeine on until you turn it off, poking ${span(everyOf(c))} after the last request (${ttlLabel(ttlOf(c))} cache).` }
+        return { text: `Warming on until you turn it off, poking ${span(everyOf(c))} after the last request (${ttlLabel(ttlOf(c))} cache).` }
       case 'off':
         c.isAutoDeclined = true
         await switchOn($, c, false)
-        return { text: 'Caffeine off.' }
+        return { text: 'Warming off.' }
       case 'for':
       case 'warm': {
         const ms = value ? parseDuration(value) : WARM
         if (ms === null) return { text: `Not a duration I know: ${value}. Try 2h, 90m or 1h30m.` }
         await switchOn($, c, true, now + ms)
-        return { text: `Caffeine on, keeping the cache warm until ${clock(now + ms, now)}.` }
+        return { text: `Warming on, keeping the cache warm until ${clock(now + ms, now)}.` }
       }
       case 'until': {
         const at = parseClock(value, now)
         if (at === null) return { text: `Not a time I know: ${value || '(none)'}. Try 18:00 or 6pm.` }
         await switchOn($, c, true, at)
-        return { text: `Caffeine on, keeping the cache warm until ${clock(at, now)}.` }
+        return { text: `Warming on, keeping the cache warm until ${clock(at, now)}.` }
       }
       case 'poke':
         if (c.poke !== 'none') return { text: 'A poke is already on its way.' }
@@ -778,12 +818,12 @@ export function warming(on: Parameters<Register>[0]): void {
       }
       case 'auto': {
         const v = value.toLowerCase()
-        if (!v) return { text: c.autoAt ? `Caffeine turns on by itself past ${sized(c.autoAt)} tokens of context.` : 'Auto is off. /caffeine auto 100k turns it on.' }
+        if (!v) return { text: c.autoAt ? `Warming turns on by itself past ${sized(c.autoAt)} tokens of context.` : 'Auto is off. /warm auto 100k turns it on.' }
         const n = v === 'off' ? 0 : v === 'on' ? 100_000 : /^(\d+(?:\.\d+)?)(k|m)?$/.test(v) ? Math.round(Number.parseFloat(v) * (v.endsWith('m') ? 1e6 : v.endsWith('k') ? 1e3 : 1)) : null
         if (n === null || (n > 0 && n < 1000)) return { text: `Not a token count I know: ${value}. Try 100k, or off.` }
         c.autoAt = n
         await $.store.set('caffeine.autoAt', n)
-        return { text: n ? `Caffeine turns on by itself once the context passes ${sized(n)} tokens (now ${sized(c.context)}).` : 'Auto off.' }
+        return { text: n ? `Warming turns on by itself once the context passes ${sized(n)} tokens (now ${sized(c.context)}).` : 'Auto off.' }
       }
       case 'cost':
         return { text: costLines(c).join('\n') }
@@ -822,7 +862,7 @@ export function warming(on: Parameters<Register>[0]): void {
         if (ms === null) return { text: `Not a duration I know: ${value || '(none)'}. Try 8h, or off for no end this time.` }
         c.idle = ms
         await $.store.set('caffeine.idle', ms)
-        return { text: `Caffeine turns itself off after ${span(ms)} without a turn of your own.` }
+        return { text: `Warming turns itself off after ${span(ms)} without a turn of your own.` }
       }
       case 'wake':
         return wakeCommand($, c, value)
@@ -841,11 +881,11 @@ export function warming(on: Parameters<Register>[0]): void {
         return { text: lines.filter(Boolean).join('\n') }
       }
       default: {
-        // a bare time is a wake: /caffeine 1 min, /caffeine at 3pm
+        // a bare time is a wake: /warm 1 min, /warm at 3pm
         if (parseWake(args, now) !== null) {
           return wakeCommand($, c, args)
         }
-        return { text: `Not a caffeine command: ${word}\n${help}` }
+        return { text: `Not a warm command: ${word}\n${help}` }
       }
     }
   })
